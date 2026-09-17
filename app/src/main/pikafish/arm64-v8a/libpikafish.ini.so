@@ -1,0 +1,5 @@
+#Threads=4
+#Hash=512
+EvalFile=libpikafish.nnue.so
+# 默认只分析 1 条主变（MultiPV>1 会把搜索力摊薄到多条线，棋力明显下降）
+MultiPV=1

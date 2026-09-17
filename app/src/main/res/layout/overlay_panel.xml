@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/overlay_root" android:layout_width="match_parent" android:layout_height="match_parent"
+    android:background="@drawable/overlay_bg" android:clickable="true" android:focusable="true"
+    android:orientation="vertical" android:padding="6dp">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical" android:orientation="horizontal">
+        <TextView android:id="@+id/overlay_btn_my_side" style="@style/OverlayButton" android:layout_width="52dp" android:layout_height="26dp" android:layout_marginEnd="3dp" android:gravity="center" android:text="己方红" android:contentDescription="切换本次分析的己方颜色" />
+        <TextView android:id="@+id/overlay_title" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:ellipsize="end" android:maxLines="1" android:text="识盘中" android:textColor="#FFE082" android:textSize="13sp" android:textStyle="bold" />
+        <TextView android:id="@+id/overlay_winrate" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="4dp" android:maxLines="1" android:textColor="#9E9E9E" android:textSize="13sp" android:textStyle="bold" />
+        <TextView android:id="@+id/overlay_btn_collapse" style="@style/OverlayButton" android:layout_width="46dp" android:layout_height="26dp" android:layout_marginStart="3dp" android:gravity="center" android:text="缩小" />
+        <TextView android:id="@+id/overlay_btn_close" style="@style/OverlayButton" android:layout_width="46dp" android:layout_height="26dp" android:layout_marginStart="3dp" android:gravity="center" android:text="关闭" />
+    </LinearLayout>
+    <LinearLayout android:layout_width="match_parent" android:layout_height="0dp" android:layout_marginTop="3dp" android:layout_weight="1" android:orientation="horizontal">
+        <com.xiangqi.assist.assist.ui.OverlayChessView android:id="@+id/overlay_chess" android:layout_width="132dp" android:layout_height="match_parent" />
+        <ScrollView android:id="@+id/overlay_status_scroll" android:layout_width="0dp" android:layout_height="match_parent" android:layout_marginStart="6dp" android:layout_weight="1" android:fillViewport="true" android:scrollbars="vertical">
+            <TextView android:id="@+id/overlay_status" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="识别中…" android:textColor="#FFE082" android:textSize="12sp" />
+        </ScrollView>
+    </LinearLayout>
+    <com.xiangqi.assist.assist.ui.OverlayButtonBar android:id="@+id/overlay_button_bar" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="3dp" android:orientation="vertical">
+        <TextView android:id="@+id/overlay_btn_run" style="@style/OverlayButton" android:gravity="center" android:text="开始" />
+        <TextView android:id="@+id/overlay_btn_mode" style="@style/OverlayButton" android:gravity="center" android:text="自动" />
+        <TextView android:id="@+id/overlay_btn_autoplay" style="@style/OverlayButton" android:gravity="center" android:text="自动走子" />
+        <TextView android:id="@+id/overlay_btn_refresh" style="@style/OverlayButton" android:gravity="center" android:text="更新棋谱" />
+        <TextView android:id="@+id/overlay_btn_turn" style="@style/OverlayButton" android:gravity="center" android:text="换走棋方" />
+        <TextView android:id="@+id/overlay_btn_sim" style="@style/OverlayButton" android:gravity="center" android:text="仿真" />
+        <TextView android:id="@+id/overlay_btn_change" style="@style/OverlayButton" android:gravity="center" android:text="变招" />
+        <TextView android:id="@+id/overlay_btn_undo" style="@style/OverlayButton" android:gravity="center" android:text="悔棋" />
+        <TextView android:id="@+id/overlay_btn_stop" style="@style/OverlayButton" android:gravity="center" android:text="重置" />
+        <TextView android:id="@+id/overlay_btn_strength" style="@style/OverlayButton" android:gravity="center" android:text="深度20" android:contentDescription="短按切换当前模式档位，长按在深度、总时、每候选时间之间切换" />
+        <TextView android:id="@+id/overlay_btn_candidate_count" style="@style/OverlayButton" android:gravity="center" android:text="候选1" android:contentDescription="候选数量1到6，点击切换" />
+        <TextView android:id="@+id/overlay_btn_hash" style="@style/OverlayButton" android:gravity="center" android:text="Hash512" />
+    </com.xiangqi.assist.assist.ui.OverlayButtonBar>
+</LinearLayout>

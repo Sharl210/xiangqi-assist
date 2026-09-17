@@ -1,0 +1,34 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Base.Theme.XiangqiAssist" parent="Theme.Material3.DayNight.NoActionBar">
+        <item name="colorPrimary">@color/brand_gold_500</item>
+        <item name="colorOnPrimary">@color/brand_navy_950</item>
+        <item name="colorSecondary">@color/brand_teal_500</item>
+        <item name="colorOnSecondary">@color/white</item>
+        <item name="colorSurface">@color/brand_navy_800</item>
+        <item name="colorOnSurface">@color/brand_text_primary</item>
+        <item name="colorOutline">@color/brand_outline</item>
+        <item name="android:colorAccent">@color/brand_gold_500</item>
+        <item name="android:windowBackground">@color/brand_navy_950</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowActionModeOverlay">true</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:enforceStatusBarContrast" tools:targetApi="q">false</item>
+        <item name="android:enforceNavigationBarContrast" tools:targetApi="q">false</item>
+    </style>
+
+    <style name="Theme.XiangqiAssist" parent="Base.Theme.XiangqiAssist" />
+
+    <style name="Theme.XiangqiAssist.Fullscreen" parent="Theme.XiangqiAssist">
+        <item name="android:actionBarStyle">@style/Widget.Theme.XiangqiAssist.ActionBar.Fullscreen</item>
+        <item name="android:windowActionBarOverlay">true</item>
+        <item name="android:windowBackground">@color/brand_navy_950</item>
+    </style>
+
+    <style name="ThemeOverlay.XiangqiAssist.FullscreenContainer" parent="">
+        <item name="fullscreenBackgroundColor">@color/brand_navy_800</item>
+        <item name="fullscreenTextColor">@color/brand_gold_300</item>
+    </style>
+</resources>

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>象棋辅助 · 使用帮助</title>
+<style>
+:root{color-scheme:dark;--bg:#08162b;--surface:#142a49;--gold:#e8b74a;--gold2:#f6da8f;--text:#fff8e7;--sub:#c9d3df;--red:#be3738;--green:#2e946b;--line:rgba(232,183,74,.35)}
+*{box-sizing:border-box}body{margin:0;background:linear-gradient(180deg,#08162b,#102b48);color:var(--text);font-family:system-ui,-apple-system,"Noto Sans SC",sans-serif;line-height:1.7}main{max-width:760px;margin:auto;padding:22px 18px 40px}h1{margin:0 0 6px;color:var(--gold2);font-size:25px}h2{margin:26px 0 10px;color:var(--gold2);font-size:18px;border-bottom:1px solid var(--line);padding-bottom:6px}h3{color:var(--gold);font-size:15px;margin:18px 0 6px}.lead{color:var(--sub);margin-top:0}.card{background:rgba(20,42,73,.92);border:1px solid var(--line);border-radius:16px;padding:13px 15px;margin:10px 0}ul,ol{padding-left:22px;margin:7px 0}li{margin:5px 0}b{color:var(--gold2)}.start{color:#7ed8aa}.stop{color:#ff8585}.note{color:var(--sub);font-size:13px}.warn{border-left:4px solid var(--red)}a{color:var(--gold2)}code{background:#0d1b34;padding:2px 5px;border-radius:5px}.credits{color:var(--sub);font-size:12px}
+</style>
+</head>
+<body><main>
+<h1>象棋辅助使用帮助</h1>
+<p class="lead">本地对弈、棋谱复盘与悬浮窗识别辅助的完整使用说明。</p>
+
+<h2>对弈与棋谱</h2>
+<div class="card"><ul>
+<li><b>对弈</b>：使用本地 Pikafish 引擎进行人机对弈，可调整执方、深度或时间、Hash、线程和开局库。</li>
+<li><b>打谱与复盘</b>：浏览着法树、前后移动、导入或导出棋谱，并可从指定局面继续对弈。</li>
+<li>普通 ARMv8 与 dotprod 版功能一致；dotprod 版适合支持相应指令集的较新设备。</li>
+</ul></div>
+
+<h2 id="assist">悬浮窗辅助</h2>
+<h3>首次准备与启停</h3>
+<div class="card"><ol>
+<li>点击<b>一键准备</b>，依次完成悬浮窗、通知和系统录屏授权。</li>
+<li>准备只建立运行环境，<b>不会开始识别、计算或自动落子</b>；初始状态始终为停止。</li>
+<li>准备完成后，点击绿色的<b class="start">一键启动</b>才开始工作；运行时该按钮变为红色<b class="stop">一键关闭</b>。</li>
+<li>切换到目标棋盘后，画面按每秒 4 个样本检查；连续 8 帧稳定（约 2 秒）后，才选一帧识别并计算。</li>
+</ol></div>
+
+<h3>辅助页控件</h3>
+<div class="card"><ul>
+<li><b>悬浮窗权限 / 通知权限</b>：单独补齐对应系统权限。</li>
+<li><b>一键准备</b>：检查权限、操作通道和录屏环境，但不进入运行态。</li>
+<li><b>一键启动 / 一键关闭</b>：开始或停止识别、计算和自动落子；关闭后保留已准备的录屏环境。</li>
+<li><b>屏幕操作通道</b>：打开系统无障碍设置。它只在自动落子时发送坐标手势。</li>
+<li><b>root 一键开启通道</b>：有可用 root 时尝试自动启用本应用的无障碍服务；没有 root 可忽略。</li>
+<li><b>自动走子</b>：开启后，满足轮次、建议定着、识别健康和通道可用等条件时执行着法；关闭时只显示建议。</li>
+<li><b>落子方式</b>：在“点击起点再点终点”和“从起点拖到终点”之间切换。</li>
+<li><b>引擎线程</b>：在自动和 1～8 线程之间切换，对下一次搜索生效。</li>
+<li><b>悬浮球大小</b>：调整球体尺寸；球始终会被限制在屏幕安全区域内。</li>
+</ul></div>
+
+<h3>悬浮窗菜单</h3>
+<div class="card"><ul>
+<li><b>开始 / 继续 / 暂停</b>：直接控制当前悬浮会话。未点击开始时保持停止，不取帧、不识别、不计算。</li>
+<li><b>模式</b>：在自动、半自动和手动摆子间切换。半自动由“更新棋谱”确认棋面；手动模式不持续截图。</li>
+<li><b>自动</b>：切换自动落子；<b>仿真</b>：控制落子偏移、延迟和候选预选。</li>
+<li><b>候选数量</b>：设置同时计算的主变数量；<b>变招</b>：浏览已经算出的其它候选，不重新启动搜索。</li>
+<li><b>悔棋</b>：回到上一个已确认局面；<b>更新棋谱</b>：立即从屏幕重新读取并应用棋面。</li>
+<li><b>重置</b>：清除当前棋面、建议与事务，重新建立识别基线。</li>
+<li><b>己方红 / 己方黑</b>：指定分析方；<b>切换走棋方</b>：纠正当前轮次。</li>
+<li><b>深度 / 总时 / 每候选时间</b>：短按调整当前档位，长按切换思考方式。</li>
+<li><b>Hash</b>：调整引擎哈希内存。</li>
+<li><b>缩小</b>：把面板收成悬浮球；单击球恢复面板，拖动球可改变位置。</li>
+<li><b>关闭</b>：关闭悬浮窗并释放录屏服务；再次使用时需要重新一键准备。</li>
+</ul></div>
+
+<h3>状态、箭头与识别</h3>
+<div class="card"><ul>
+<li>蓝色箭头表示暂定候选，绿色箭头表示建议已经定着。</li>
+<li>识别结果会经过八帧画面稳定、模型置信度、棋盘结构和轮次检查；不满足条件时等待下一窗口，不用旧棋面补写当前结果。</li>
+<li>暂停、手动模式或一键关闭后，不继续识别和计算。</li>
+<li>缩成悬浮球后若位置异常，程序会把球夹回状态栏与导航栏之间的可见区域。</li>
+</ul></div>
+
+<h2>权限与隐私</h2>
+<div class="card"><ul>
+<li><b>屏幕录制</b>仅用于设备本地棋盘识别；<b>悬浮窗</b>用于展示状态和建议。</li>
+<li><b>无障碍服务</b>仅在自动落子时发送点按或拖动手势，不读取控件文字或遍历界面内容。</li>
+<li>识别与引擎计算均在设备本地完成，不要求上传棋盘截图。</li>
+</ul></div>
+
+<h2>问题处理</h2>
+<div class="card"><ul>
+<li>长时间没有识别：确认已点击一键启动、棋盘完整可见，并等待约 2 秒稳定窗口。</li>
+<li>只显示建议但不落子：检查自动走子、屏幕操作通道、己方颜色和当前轮次。</li>
+<li>悬浮球不易看见：回到辅助页调大球体；新版会自动把保存位置夹回屏幕安全区。</li>
+<li>不确定 APK 版本：优先使用普通 <code>armv8</code>；支持 ARMv8.2 dotprod 的设备可尝试 dotprod 版。</li>
+</ul></div>
+
+<h2>使用边界</h2>
+<div class="card warn">本应用仅供个人学习、技术研究与文化交流。屏幕识别、悬浮窗建议和自动落子均由用户主动启用；使用时请遵守当地法律法规、软件许可和所在平台规则。</div>
+
+<h2>参考与鸣谢</h2>
+<p class="credits">感谢 chinese-chess-android、Pikafish、DroidFish、VinXiangQi、cchess、MPAndroidChart、TensorFlow Lite、YOLO 及 Android 开源生态的作者和贡献者。详细链接与许可证说明见项目 README。</p>
+</main></body>
+</html>

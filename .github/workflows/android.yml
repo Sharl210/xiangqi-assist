@@ -1,0 +1,46 @@
+# Continuous integration: build both Release APK variants on pushes and pull requests.
+name: Build-XiangqiAssist
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+env:
+  GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+          cache: gradle
+
+      - name: Assemble ARMv8 Release APKs
+        run: ./gradlew :app:assembleArmv8-Release :app:assembleArmv8-dotprod-Release --stacktrace
+
+      - name: Verify application identity
+        run: |
+          for apk in app/build/outputs/apk/*/release/*.apk; do
+            echo "Checking $apk"
+            "$ANDROID_HOME/build-tools/34.0.0/aapt2" dump badging "$apk" | grep -E "package: name='com.xiangqi.assist' versionCode='2' versionName='1.1'|application-label:'象棋辅助'"
+            "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose "$apk" | grep 'Verified using v2 scheme (APK Signature Scheme v2): true'
+          done
+
+      - name: Publish build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiangqi-assist-1.1-apks
+          path: app/build/outputs/apk/*/release/*.apk
+          if-no-files-found: error

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+
+    <!-- 象棋辅助品牌色：与启动 Logo 同源。 -->
+    <color name="brand_navy_950">#08162B</color>
+    <color name="brand_navy_900">#0D1B34</color>
+    <color name="brand_navy_800">#142A49</color>
+    <color name="brand_navy_700">#1B385C</color>
+    <color name="brand_gold_500">#E8B74A</color>
+    <color name="brand_gold_300">#F6DA8F</color>
+    <color name="brand_red_600">#BE3738</color>
+    <color name="brand_red_500">#D54A4B</color>
+    <color name="brand_green_600">#237A57</color>
+    <color name="brand_green_500">#2E946B</color>
+    <color name="brand_teal_500">#3C8D91</color>
+    <color name="brand_surface">#E6132849</color>
+    <color name="brand_surface_strong">#F21A3152</color>
+    <color name="brand_text_primary">#FFF8E7</color>
+    <color name="brand_text_secondary">#C9D3DF</color>
+    <color name="brand_outline">#66E8B74A</color>
+
+    <!-- 兼容旧界面引用，映射到统一色系。 -->
+    <color name="light_blue_600">#FF1B385C</color>
+    <color name="light_blue_900">#FF0D1B34</color>
+    <color name="light_blue_A200">#FFF6DA8F</color>
+    <color name="light_blue_A400">#FFE8B74A</color>
+    <color name="black_overlay">#9908162B</color>
+    <color name="choice_color_1">#FFE8B74A</color>
+    <color name="choice_color_2">#FFD98045</color>
+    <color name="choice_color_3">#FF2E946B</color>
+    <color name="choice_color_4">#FFF6DA8F</color>
+    <color name="choice_color_5">#FF3C8D91</color>
+    <color name="move_history_background">#66142849</color>
+    <color name="game_hint_background">#D9F8F1DC</color>
+</resources>
