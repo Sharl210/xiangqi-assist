@@ -4,11 +4,13 @@ name: Build-XiangqiAssist
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
     branches: [ main ]
+  workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g
@@ -44,3 +46,24 @@ jobs:
           name: xiangqi-assist-1.1-apks
           path: app/build/outputs/apk/*/release/*.apk
           if-no-files-found: error
+
+      # Release APKs are built on the GitHub runner so the public workflow does not need
+      # the maintainer's private signing key. They use the public-checkout debug key.
+      - name: Prepare v1.1 release assets
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/tags/v1.1'
+        run: |
+          mkdir -p dist
+          cp app/build/outputs/apk/armv8-/release/*.apk dist/xiangqi-assist-1.1-armv8.apk
+          cp app/build/outputs/apk/armv8-dotprod-/release/*.apk dist/xiangqi-assist-1.1-armv8-dotprod.apk
+          sha256sum dist/*.apk | tee dist/SHA256SUMS.txt
+
+      - name: Create or update v1.1 Release
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/tags/v1.1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if ! gh release view v1.1 >/dev/null 2>&1; then
+            gh release create v1.1 --title '象棋辅助 1.1' --notes-file docs/RELEASE_1.1.md
+          fi
+          gh release upload v1.1 dist/*.apk dist/SHA256SUMS.txt --clobber
+          gh release edit v1.1 --title '象棋辅助 1.1' --notes-file docs/RELEASE_1.1.md
