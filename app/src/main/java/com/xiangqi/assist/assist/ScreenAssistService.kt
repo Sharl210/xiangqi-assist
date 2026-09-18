@@ -49,7 +49,7 @@ import kotlin.math.roundToInt
  *
  * 两种工作方式：
  * - 指导模式（默认）：只识别、只提示，走子由玩家手动完成；
- * - 自动模式（面板「自动」按钮开启，默认关闭）：建议定着后，通过本应用的
+ * - 自动模式（首次默认，面板可切换）：建议定着后，通过本应用的
  *   [AssistAccessibilityService]（屏幕操作通道）按坐标把着法落到屏幕上。
  *   自动模式需要用户先在系统设置里开启该无障碍服务（有 root 时可一键开启）。
  *
@@ -378,7 +378,7 @@ class ScreenAssistService : Service() {
      * 点选"起点→终点"录入实战着法（自动翻转走子方）、再点一次已选中子将其删除。
      */
     /** 当前工作模式的唯一运行时真源；不能再由 manual/semi 两个布尔反推（指导与自动会撞值）。 */
-    @Volatile private var activeWorkMode = AssistConfig.MODE_AUTO
+    @Volatile private var activeWorkMode = AssistConfig.DEFAULT_WORK_MODE
     @Volatile private var manualMode = false
     /** 手动模式下小棋盘当前选中的格（canonical x,y） */
     @Volatile private var manualSelected: Pair<Int, Int>? = null
@@ -1549,8 +1549,24 @@ class ScreenAssistService : Service() {
     private fun structuralProblem(canonical: Array<IntArray>): String? {
         AssistBoard.validate(canonical).firstOrNull()?.let { return it }
         AssistBoard.invalidPiecePlacement(canonical)?.let { return it }
+        if (!landingRebasePending && !refresh.isActive && !resumeRebasePending) {
+            // 已有可靠基线时，缺子不是“局面变化”：只有规则确认的一步合法走子
+            // 才能解释棋子消失。绝不拿上一局面把缺失棋子补回当前结果。
+            BoardCompletenessPolicy.rejectionReason(currentCanonical, canonical)?.let { return it }
+        }
         if (landingRebasePending) {
-            // 核对超时后的第一张画面可能是落子前，也可能是落子后；在与保存快照比对前，
+            // 核对超时后的第一张画面可能是落子前、预期落子后，或期间已经走了新着法。
+            // 不要求它必须是一两步可达，但仍拒绝相对保存快照明显“只少了棋子”的残缺子集，
+            // 否则日志中 27→26→…→13 的坏盘面会在每次超时重建时重新成为基线。
+            val rebaseBaselines = listOf(landingRebasePreBoard, landingRebaseExpectedBoard)
+                .filterNotNull()
+            val rebaseIssues = rebaseBaselines
+                .mapNotNull { BoardCompletenessPolicy.rejectionReason(it, canonical) }
+            // 观察结果只要能由任一保存快照解释，就继续交给轮次重建；只有相对所有
+            // 可用快照都呈现残缺子集时才拒绝，避免“预期落子后盘面”被落子前快照误杀。
+            if (rebaseBaselines.isNotEmpty() && rebaseIssues.size == rebaseBaselines.size) {
+                return rebaseIssues.first()
+            }
             // 两种轮次只要有一种对引擎安全就应放行，避免“将军着”因暂用旧轮次被误拒。
             val before = AssistBoard.engineUnsafeReason(canonical, landingRebaseRedGo)
             val after = AssistBoard.engineUnsafeReason(canonical, !landingRebaseRedGo)
@@ -1579,6 +1595,8 @@ class ScreenAssistService : Service() {
     ): String? {
         AssistBoard.validate(canonical).firstOrNull()?.let { return it }
         AssistBoard.invalidPiecePlacement(canonical)?.let { return it }
+        val baseline = landing.expectedPostBoard ?: landing.preBoard
+        BoardCompletenessPolicy.rejectionReason(baseline, canonical)?.let { return it }
         val afterOurMove = AssistBoard.engineUnsafeReason(canonical, !landing.preRedGo)
         val afterOpponentMove = AssistBoard.engineUnsafeReason(canonical, landing.preRedGo)
         return if (afterOurMove == null || afterOpponentMove == null) null else afterOurMove
@@ -1611,7 +1629,7 @@ class ScreenAssistService : Service() {
 
     /**
      * 连续八个录屏样本稳定后，只对挑出的一个关键帧调用一次模型。
-     * 稳定窗口本身不做模型投票；异常结果直接拒绝，等待下一组样本。
+     * 稳定窗口只挑选清晰关键帧；异常结果直接拒绝，等待下一个相邻样本。
      */
     private fun handleFrameBatch(frames: List<Frame>, epoch: Long) {
         if (frames.isEmpty() || stopping || overlayClosed || epoch != recognitionEpoch ||
@@ -1620,6 +1638,9 @@ class ScreenAssistService : Service() {
         debugSaveFrameIfRequested(frame)
         val observation = recognizeFrame(frame, epoch)
         if (observation == null) {
+            // 模型没有给出可用盘面：保留滑动窗口，只把释放闸门重新打开；
+            // 下一个 250ms 样本即可再次推理，不必重新等待八帧。
+            stableFrameWindow.rearm()
             trace("VISION_REJECT", "reason=unavailable epoch=$epoch phase=${refreshPhase()} misses=${yoloMissStreak + 1}")
             streamAnomalyStreak++
             yoloMissStreak++
@@ -1649,6 +1670,8 @@ class ScreenAssistService : Service() {
             structuralProblem(canonical)
         }
         if (unsafe != null) {
+            // 当前关键帧被结构/缺子门拒绝；滑动窗口不清空，下一张相邻样本直接重试。
+            stableFrameWindow.rearm()
             trace("VISION_REJECT", "reason=$unsafe epoch=$epoch")
             streamAnomalyStreak++
             yoloMissStreak++
@@ -1714,6 +1737,8 @@ class ScreenAssistService : Service() {
                 onBoardConfirmed(epoch)
             }
             BoardTracker.Event.UNSTABLE -> {
+                // 跟踪器尚未接受这张盘面时也要继续消费相邻样本；窗口本身仍保留最近八帧。
+                stableFrameWindow.rearm()
                 cropUnstableStreak++
                 if (cropUnstableStreak >= CROP_RESET_MISSES) {
                     cropUnstableStreak = 0
@@ -1762,6 +1787,9 @@ class ScreenAssistService : Service() {
         )
         when (verdict) {
             LandingVerificationPolicy.Verdict.WAITING -> {
+                // 当前稳定关键帧还不能证明落子已生效；保留窗口内容，
+                // 但解除一次性释放闸门，让下一个250ms样本立即重新核对。
+                stableFrameWindow.rearm()
                 autoLastResult = "等待确认本次落子结果"
                 requestRenderOnly()
             }
@@ -2588,7 +2616,7 @@ class ScreenAssistService : Service() {
         // 稳定窗口成立 = 准备送模型；“稳定窗口是否还在成立”是识别侧的关键证据。
         lastStableWindowAt = now
         streamAnomalyStreak = 0
-        // 单次模型识别：稳定窗口中的样本只用于选关键帧，不做模型投票。
+        // 单次模型识别：稳定窗口中的样本只用于选出一张关键帧。
         publishFrames(listOf(selected))
     }
 
@@ -2880,6 +2908,16 @@ class ScreenAssistService : Service() {
      * - 运行中显示“暂停”，只停运行管线，不清棋谱和日志。
      */
     private fun toggleRun() {
+        val suspendedSnapshot = foregroundPauseSnapshot
+        if (suspendedSnapshot?.wasRunning == true) {
+            // 用户在临时前台保护期间点“暂停”：这是明确取消恢复意图，不是恢复。
+            foregroundPauseSnapshot = null
+            pauseRuntime(clearAnalysis = true)
+            trace("RUN_PAUSE_DURING_FOREGROUND_SWITCH", "resumePackage=${suspendedSnapshot.resumePackage}")
+            setStatus("已暂停（不会在返回原应用后自动继续）")
+            postRender()
+            return
+        }
         if (!paused) {
             trace("RUN_PAUSE", "landing=${landingState?.stage} searching=$searching fen=$currentFen")
             pauseRuntime(clearAnalysis = true)
@@ -4483,6 +4521,9 @@ class ScreenAssistService : Service() {
                 ?: return@postDelayed
             landingState = completed
             autoState = AutoState.WAITING_BOARD
+            // 手势期间可能已经释放过一帧旧稳定画面；进入回执阶段必须允许
+            // 下一张相邻样本再次进入模型，而不是等画面签名先变化一次。
+            stableFrameWindow.rearm()
             trace("GESTURE_FINISHED", "token=$token ucci=${completed.ucci}")
             autoLastActionAt = completed.completedAt
             autoLastResult = "手势已完成，等待落子后新画面"

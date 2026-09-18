@@ -7,7 +7,7 @@
     <!-- 屏幕操作通道（自动走子） -->
     <string name="assist_accessibility_label">象棋辅助·屏幕操作通道</string>
     <string name="assist_accessibility_summary">按悬浮窗给出的着法在棋盘上点按/滑动</string>
-    <string name="assist_accessibility_desc">开启后，本应用可以把悬浮窗算出的着法落到屏幕上（自动走子）。仅按坐标派发点按与滑动，不读取任何界面内容，不订阅界面事件。关闭后立即失去屏幕操作能力。</string>
+    <string name="assist_accessibility_desc">开启后，本应用可以把悬浮窗算出的着法落到屏幕上（自动走子）。仅按坐标派发点按与滑动，不读取任何界面内容，只观察窗口变化以保护前台切换。关闭后立即失去屏幕操作能力。</string>
 
     <string name="engine_terminated">引擎已终止</string>
     <string name="uci_protocol_error">UCI 协议错误</string>

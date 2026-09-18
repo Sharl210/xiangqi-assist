@@ -269,13 +269,14 @@ class OverlayPanelView @JvmOverloads constructor(
             invalidate()
         }
         btnRun.text = when {
-            model.suspendedByForeground -> "切换暂停"
+            model.suspendedByForeground -> "暂停"
             model.running -> "暂停"
             model.hasRunSession -> "继续"
             else -> "开始"
         }
-        btnRun.isEnabled = !model.suspendedByForeground
-        btnRun.setTextColor(if (model.running) ON_COLOR else normalColor)
+        // 前台保护只是内部临时暂停，不锁死用户按钮；“暂停”仍可被用户明确点击。
+        btnRun.isEnabled = true
+        btnRun.setTextColor(if (model.running || model.suspendedByForeground) ON_COLOR else normalColor)
         btnMySide.text = model.mySideText
         btnMode.text = model.modeText
         btnAutoPlay.setTextColor(if (model.autoPlay) ON_COLOR else normalColor)

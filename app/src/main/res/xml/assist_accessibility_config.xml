@@ -2,7 +2,7 @@
 <!--
   屏幕操作通道配置。
   - canPerformGestures：唯一需要的能力，用于按坐标点按/滑动，把悬浮窗给出的着法落到屏幕上。
-  - accessibilityEventTypes：留空（不订阅任何界面事件），本服务不读取界面内容。
+  - accessibilityEventTypes：只订阅窗口状态/窗口列表变化，用于识别真实全屏前台；本服务不读取界面内容。
   - canRetrieveWindowContent 保持 false：不抓取任何应用的界面节点。
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"

@@ -69,7 +69,8 @@ object AssistBoard {
      * - 满足中国象棋走法规则（车马炮相仕帅兵的走法与吃子限制）。
      *
      * 用于把「动画残影 / 棋子被遮挡 / 幻觉帧」这类坏帧挡在确认流程之外。
-     * 规则模块异常时返回 true（宁可放行，也不因工具异常阻断识别）。
+     * 规则模块异常时返回 false；在识别质量门中，无法证明是合法走子就必须等待下一样本，
+     * 不能把异常工具状态当作放行证据。
      */
     fun isLegalSingleMove(prev: Array<IntArray>, next: Array<IntArray>): Boolean {
         var fx = -1; var fy = -1; var tx = -1; var ty = -1
@@ -94,7 +95,7 @@ object AssistBoard {
             }
             Rule.isValidMove(Move(Position(fx, fy), Position(tx, ty), b), b)
         } catch (t: Throwable) {
-            true
+            false
         }
     }
 

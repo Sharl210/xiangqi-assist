@@ -76,6 +76,19 @@ class YoloPipelineTest {
     }
 
     @Test
+    fun `lower confidence geometrically valid piece is retained`() {
+        val lb = YoloPostprocessor.Letterbox.forFrame(640, 640)
+        val rows = Array(YoloPostprocessor.ANCHORS) { FloatArray(YoloPostprocessor.DIMS) }
+        // board 框：8×9 格，中心在 320,320；棋子置信度 0.48，旧 0.60 门会静默丢掉。
+        put(rows, 0, 320f, 320f, 512f, 576f, 0.90f, YoloDetection.LABEL_BOARD)
+        put(rows, 1, 288f, 288f, 16f, 16f, 0.60f, 7)
+        rows[1][5 + 7] = 0.80f
+        val dets = YoloPostprocessor.decode(rows, lb, 640, 640)
+        assertEquals(2, dets.size)
+        assertEquals(1, dets.count { !it.isBoard })
+    }
+
+    @Test
     fun `ambiguous class prediction is rejected instead of guessed`() {
         val lb = YoloPostprocessor.Letterbox.forFrame(640, 640)
         val rows = Array(YoloPostprocessor.ANCHORS) { FloatArray(YoloPostprocessor.DIMS) }

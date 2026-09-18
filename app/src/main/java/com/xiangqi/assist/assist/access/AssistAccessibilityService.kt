@@ -33,9 +33,9 @@ class AssistAccessibilityService : AccessibilityService() {
         if (e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             e.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) return
-        val packageName = e.packageName?.toString()?.trim().orEmpty().ifEmpty { null }
-        val fullScreen = isFullScreenApplicationWindow(e)
-        globalForegroundObserver?.invoke(packageName, fullScreen)
+        // 不直接信任事件包名：通知/权限弹窗的事件包名可能属于弹窗应用，
+        // 但真正的全屏前台仍是底下的棋盘应用。只报告当前活动的 application window。
+        emitApplicationWindow(e.windowId, e.packageName?.toString())
     }
 
     override fun onInterrupt() {
@@ -52,19 +52,37 @@ class AssistAccessibilityService : AccessibilityService() {
         super.onDestroy()
     }
 
-    /**
-     * 从当前活动窗口建立一次基准。这里只读窗口类型、包名和边界；如果 ROM 不提供
-     * 当前窗口根节点，就等待下一条窗口事件，不猜测当前应用。
-     */
     private fun emitCurrentForegroundWindow() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
-        val target = runCatching {
-            windows.asSequence()
+        emitApplicationWindow(windowId = null, eventPackage = null)
+    }
+
+    /**
+     * 只从当前活动的 application window 发布包名和全屏状态。
+     * 事件本身可能来自通知、权限面板或输入法，不能直接把事件包名当成前台应用。
+     */
+    private fun emitApplicationWindow(windowId: Int?, eventPackage: String?) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
+        val targetAndEventMatch = runCatching {
+            val applicationWindows = windows.asSequence()
                 .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
-                .firstOrNull { it.isActive || it.isFocused }
+                .toList()
+            val activeWindow = applicationWindows.firstOrNull { it.isActive || it.isFocused }
+            val eventWindow = applicationWindows.firstOrNull { windowId != null && it.id == windowId }
+            // 当前 active/focused application window 是前台真源；事件窗口只在 ROM
+            // 没有标记活动窗口时兜底，避免后台窗口事件被误报成真实切出。
+            val target = activeWindow ?: eventWindow
+            target to (eventWindow != null && target === eventWindow)
         }.getOrNull() ?: return
+        val target = targetAndEventMatch.first ?: return
+        val eventWasApplicationWindow = targetAndEventMatch.second
+        // canRetrieveWindowContent=false 的 ROM 可能不给 root；只有事件本身命中
+        // application window 时，才允许把它携带的包名作为受限回退。系统通知事件
+        // 即使当前活动 application 是棋盘，也不能把通知包名冒充前台应用。
         val packageName = runCatching { target.root?.packageName?.toString() }
-            .getOrNull()?.trim().orEmpty().ifEmpty { return }
+            .getOrNull()?.trim().orEmpty().ifEmpty {
+                if (eventWasApplicationWindow) eventPackage?.trim().orEmpty() else ""
+            }.ifEmpty { return }
         val bounds = Rect()
         target.getBoundsInScreen(bounds)
         val dm = resources.displayMetrics
@@ -77,23 +95,6 @@ class AssistAccessibilityService : AccessibilityService() {
     /** 供连线服务在已连接的无障碍通道上主动建立一次全屏基准。 */
     fun reportCurrentForegroundWindow() {
         emitCurrentForegroundWindow()
-    }
-
-    private fun isFullScreenApplicationWindow(event: AccessibilityEvent): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return true
-        val eventWindowId = event.windowId
-        val target = runCatching {
-            windows.asSequence()
-                .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
-                .firstOrNull { it.id == eventWindowId }
-                ?: windows.asSequence()
-                    .filter { it.type == AccessibilityWindowInfo.TYPE_APPLICATION }
-                    .firstOrNull { it.isActive || it.isFocused }
-        }.getOrNull() ?: return false
-        val bounds = Rect()
-        target.getBoundsInScreen(bounds)
-        val dm = resources.displayMetrics
-        return isFullScreenBounds(bounds, dm.widthPixels, dm.heightPixels)
     }
 
     private fun isFullScreenBounds(bounds: Rect, screenW: Int, screenH: Int): Boolean {

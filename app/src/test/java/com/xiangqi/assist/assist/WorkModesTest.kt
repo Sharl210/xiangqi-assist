@@ -39,8 +39,9 @@ class WorkModesTest {
         m = WorkModes.nextInCycle(m); assertEquals(AssistConfig.MODE_SEMI, m)
         m = WorkModes.nextInCycle(m); assertEquals(AssistConfig.MODE_MANUAL, m)
         m = WorkModes.nextInCycle(m); assertEquals(AssistConfig.MODE_AUTO, m)
-        // 默认模式就是自动
-        assertEquals(AssistConfig.MODE_AUTO, AssistConfig.MODE_AUTO)
+        // 首次没有持久化选择时，生产配置的默认值就是自动。
+        assertEquals(AssistConfig.MODE_AUTO, AssistConfig.DEFAULT_WORK_MODE)
+        assertTrue(AssistConfig.DEFAULT_AUTO_PLAY)
     }
 
     @Test

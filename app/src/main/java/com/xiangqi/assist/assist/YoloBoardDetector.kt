@@ -132,19 +132,21 @@ class YoloBoardDetector(context: Context) {
         val inferMs = System.currentTimeMillis() - t0
         // 模型本身负责类别判定；锚点只用于几何兜底，不能放宽类别阈值或替换字形。
         // 类别边际不足时直接丢弃该框，交给下一次稳定窗口重新识别，禁止上下文猜测。
-        val confThreshold = 0.60
+        val confThreshold = 0.45
         val dets = YoloPostprocessor.decode(
             output[0], lb, cw, ch,
             confThreshold = confThreshold,
-            aspectMin = 0.55,
-            aspectMax = 1.50,
-            sizeMinFactor = 0.45,
-            sizeMaxFactor = 1.80,
-            classMarginMin = 0.18,
+            aspectMin = 0.50,
+            aspectMax = 1.60,
+            sizeMinFactor = 0.40,
+            sizeMaxFactor = 2.00,
+            classMarginMin = 0.05,
         )
         // 裁剪坐标 -> 帧坐标
         val shifted0 = if (cx0 == 0 && cy0 == 0) dets
-        else dets.map { YoloDetection(it.labelId, it.score, it.cx + cx0, it.cy + cy0, it.w, it.h) }
+        else dets.map {
+            YoloDetection(it.labelId, it.score, it.cx + cx0, it.cy + cy0, it.w, it.h, it.alternatives)
+        }
         // 排除区（悬浮窗面板）：面板上的棋子图样不属于真实棋局，必须剔除，
         // 否则会凭空多出/错位若干子，让识别结果不可用
         val shifted = if (exclude == null) shifted0 else shifted0.filterNot { d ->

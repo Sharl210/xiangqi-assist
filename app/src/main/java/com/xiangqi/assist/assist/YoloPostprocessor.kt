@@ -9,10 +9,12 @@ import kotlin.math.roundToInt
  * 解码 [1,25200,20] 张量 -> 置信度过滤 -> 类别感知 NMS -> 比例/尺寸一致性过滤。
  *
      * 过滤策略与 VinXiangQi 的 GetBoardFromPrediction 一致并加强：
- * - 棋子框宽高比须在 [aspectMin, aspectMax]；
- * - 类别第一名与第二名必须有足够间隔（[classMarginMin]），低间隔直接丢弃，
- *   不用上一帧去“猜”字形；
- * - 相对“棋子宽度中位数”偏差过大的框剔除。
+ * - 棋子框宽高比须合理；
+ * - 类别第一名与第二名只要求有最小可辨差距，不能因轻微置信度波动直接丢掉整枚棋子；
+ * - 有棋盘框时按棋盘格尺寸做几何过滤；没有棋盘框时才使用较宽的相对尺寸兜底。
+ *
+ * 识别质量门在映射/结构校验层继续负责拒绝坏盘面；本层不使用上一帧猜类别，也不以
+ * “低分”作为把真实棋子静默删除的理由。
  */
 object YoloPostprocessor {
 
@@ -34,21 +36,21 @@ object YoloPostprocessor {
 
     /**
      * @param output 解释器原始输出 [1,25200,20]（已乘 sigmoid 的解码值），行序即 anchor 序
-     * @param confThreshold 棋子/棋盘统一置信度阈值（参考实现用 0.7，取 0.6 兼顾召回）
+     * @param confThreshold 棋子/棋盘统一置信度阈值；低置信框仍须通过类别边际、几何和最终盘面结构门
      */
     fun decode(
         output: Array<FloatArray>,
         lb: Letterbox,
         frameW: Int,
         frameH: Int,
-        confThreshold: Double = 0.60,
+        confThreshold: Double = 0.45,
         iouThreshold: Double = 0.45,
-        aspectMin: Double = 0.70,
-        aspectMax: Double = 1.30,
-        sizeMinFactor: Double = 0.55,
-        sizeMaxFactor: Double = 1.60,
-        /** 类别第一名相对第二名的最小置信度差；低于此值的字形不进入棋面。 */
-        classMarginMin: Double = 0.18,
+        aspectMin: Double = 0.50,
+        aspectMax: Double = 1.60,
+        sizeMinFactor: Double = 0.40,
+        sizeMaxFactor: Double = 2.20,
+        /** 类别第一名相对第二名的最小置信度差；仅过滤近乎不可分辨的框。 */
+        classMarginMin: Double = 0.05,
     ): List<YoloDetection> {
         data class Raw(
             val labelId: Int,
@@ -116,18 +118,51 @@ object YoloPostprocessor {
                 r.alternatives))
         }
 
-        // 棋子比例过滤 + 尺寸一致性过滤（board 框不参与）
-        val pieces = dets.filter { !it.isBoard && it.w > 0 && aspectOk(it, aspectMin, aspectMax) }
+        // 棋子比例过滤 + 尺寸一致性过滤（board 框不参与）。
+        // 有可靠棋盘框时优先按“每格尺寸 + 框内位置”判断，避免一个低置信但真实的
+        // 边缘棋子因为全局中位数偏差被静默删除；没有棋盘框时才使用宽松中位数兜底。
+        val pieces = dets.filter { !it.isBoard && it.w > 0 && it.h > 0 && aspectOk(it, aspectMin, aspectMax) }
         if (pieces.isEmpty()) return dets.filter { it.isBoard }
         val medianW = median(pieces.map { it.w })
         val medianH = median(pieces.map { it.h })
+        val board = dets.filter { it.isBoard }.maxByOrNull { it.score }
+        val boardGeometry = board?.let { b ->
+            val ratio = b.w / b.h
+            if (b.w > 0 && b.h > 0 && ratio in 0.70..1.30 &&
+                b.w >= medianW * 7.0 && b.h >= medianH * 8.0) {
+                val cellW = b.w / 8.0
+                val cellH = b.h / 9.0
+                val x0 = b.cx - b.w / 2.0
+                val y0 = b.cy - b.h / 2.0
+                val x1 = b.cx + b.w / 2.0
+                val y1 = b.cy + b.h / 2.0
+                doubleArrayOf(x0, y0, x1, y1, cellW, cellH)
+            } else null
+        }
+        fun boardGeometryOk(d: YoloDetection, g: DoubleArray): Boolean {
+            val cellW = g[4]
+            val cellH = g[5]
+            val marginX = cellW * 0.60
+            val marginY = cellH * 0.60
+            val inBoard = d.cx >= g[0] - marginX && d.cx <= g[2] + marginX &&
+                d.cy >= g[1] - marginY && d.cy <= g[3] + marginY
+            val sizeOk = d.w in (cellW * 0.25)..(cellW * 2.20) &&
+                d.h in (cellH * 0.25)..(cellH * 2.20)
+            return inBoard && sizeOk
+        }
         val out = ArrayList<YoloDetection>()
+        // 没有棋盘框且检测数量很少时，包围盒本身不可靠；保留较严格的
+        // 小框下限以挡住按钮/标记误检。检测数量足够时使用调用方给出的宽松下限。
+        val fallbackMinFactor = if (pieces.size < 8) maxOf(sizeMinFactor, 0.55) else sizeMinFactor
         for (d in dets) {
             when {
                 d.isBoard -> out.add(d)
-                aspectOk(d, aspectMin, aspectMax) && d.w >= medianW * sizeMinFactor && d.w <= medianW * sizeMaxFactor
-                    && d.h >= medianH * sizeMinFactor && d.h <= medianH * sizeMaxFactor -> out.add(d)
-                // 尺寸离群的丢弃
+                !aspectOk(d, aspectMin, aspectMax) -> Unit
+                boardGeometry != null && boardGeometryOk(d, boardGeometry) -> out.add(d)
+                boardGeometry == null &&
+                    d.w >= medianW * fallbackMinFactor && d.w <= medianW * sizeMaxFactor &&
+                    d.h >= medianH * fallbackMinFactor && d.h <= medianH * sizeMaxFactor -> out.add(d)
+                // 几何明显不可能的检测框才丢弃；不按类别置信度回填或猜测。
             }
         }
         return out

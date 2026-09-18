@@ -14,13 +14,10 @@ class StableFrameWindowTest {
     @Test
     fun `eight stable samples release one key frame`() {
         val window = StableFrameWindow()
-        assertFalse(window.accept(frame(0x101010, 0), 1, 1000).ready)
-        assertFalse(window.accept(frame(0x101010, 1), 1, 1250).ready)
-        assertFalse(window.accept(frame(0x101010, 2), 1, 1500).ready)
-        assertFalse(window.accept(frame(0x101010, 3), 1, 1750).ready)
-        assertFalse(window.accept(frame(0x101010, 4), 1, 2000).ready)
-        assertFalse(window.accept(frame(0x101010, 5), 1, 2250).ready)
-        assertFalse(window.accept(frame(0x101010, 6), 1, 2500).ready)
+        repeat(7) { i ->
+            val result = window.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 250L)
+            assertFalse(result.ready)
+        }
         val result = window.accept(frame(0x101010, 7), 1, 2750)
         assertTrue(result.ready)
         assertEquals(8, result.stableCount)
@@ -28,15 +25,51 @@ class StableFrameWindowTest {
     }
 
     @Test
-    fun `motion rejects current window and does not use old frame`() {
+    fun `stable window advances one sample after motion instead of restarting at zero`() {
         val window = StableFrameWindow()
-        window.accept(frame(0x101010, 0), 1, 1000)
-        window.accept(frame(0x101010, 1), 1, 1250)
-        val result = window.accept(frame(0xFFFFFF, 2), 1, 1500)
+        repeat(8) { i -> window.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 250L) }
+
+        // 第9个样本发生变化：窗口变成“旧7帧+新1帧”，不是清空为0。
+        val changed = window.accept(frame(0xFFFFFF, 8), 1, 3000)
+        assertFalse(changed.ready)
+        assertTrue(changed.restartedByChange)
+        assertEquals(8, changed.stableCount)
+
+        // 新画面只需再提供7个样本；第8个新样本与前7个共同组成稳定窗口。
+        var result: StableFrameWindow.Result? = null
+        for (i in 9..14) {
+            result = window.accept(frame(0xFFFFFF, i.toLong()), 1, 3000L + (i - 8) * 250L)
+            assertFalse(result.ready)
+        }
+        result = window.accept(frame(0xFFFFFF, 15), 1, 4750)
+        assertTrue(result.ready)
+        assertEquals(8, result.stableCount)
+        assertNotNull(result.selected)
+        result = window.accept(frame(0xFFFFFF, 16), 1, 5000)
+        // 后续静止样本不会重复推理。
         assertFalse(result.ready)
-        assertTrue(result.restartedByChange)
         assertNull(result.selected)
-        assertEquals(1, result.stableCount)
+
+        // 重新构造一次，精确验证第8个新样本释放。
+        val second = StableFrameWindow()
+        repeat(8) { i -> second.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 250L) }
+        second.accept(frame(0xFFFFFF, 8), 1, 3000)
+        var releasedAt = -1
+        for (i in 9..16) {
+            val r = second.accept(frame(0xFFFFFF, i.toLong()), 1, 3000L + (i - 8) * 250L)
+            if (r.ready) releasedAt = i
+        }
+        assertEquals(15, releasedAt)
+    }
+
+    @Test
+    fun `rearm retries the current stable window on the next sample`() {
+        val window = StableFrameWindow()
+        repeat(8) { i -> window.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 250L) }
+        window.rearm()
+        val result = window.accept(frame(0x101010, 8), 1, 3000)
+        assertTrue(result.ready)
+        assertEquals(8, result.stableCount)
     }
 
     @Test

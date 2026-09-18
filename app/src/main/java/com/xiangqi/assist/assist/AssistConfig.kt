@@ -66,7 +66,7 @@ class AssistConfig(context: Context) {
      * 只有这一个入口，保证三种模式不会同时亮起。默认自动走子。
      */
     var workMode: Int
-        get() = sp.getInt(KEY_WORK_MODE, MODE_AUTO).coerceIn(MODE_GUIDE, MODE_AUTO)
+        get() = sp.getInt(KEY_WORK_MODE, DEFAULT_WORK_MODE).coerceIn(MODE_GUIDE, MODE_AUTO)
         set(value) { sp.edit().putInt(KEY_WORK_MODE, value.coerceIn(MODE_GUIDE, MODE_AUTO)).apply() }
 
     /** 旧设置字段仅为兼容；生产录屏采样固定为4帧/秒，不能再按档位改变采样频率。 */
@@ -110,7 +110,7 @@ class AssistConfig(context: Context) {
 
     /** 自动走子开关（默认开）：与「模式」是两件事——模式决定识别与刷新方式，这个决定要不要自动落子 */
     var autoPlay: Boolean
-        get() = sp.getBoolean(KEY_AUTO_PLAY, true)
+        get() = sp.getBoolean(KEY_AUTO_PLAY, DEFAULT_AUTO_PLAY)
         set(value) { sp.edit().putBoolean(KEY_AUTO_PLAY, value).apply() }
 
     /** 候选主变数量：1..6；默认1。自动/指导/半自动均完全遵从此设置，不按模式偷偷改写。 */
@@ -240,6 +240,10 @@ class AssistConfig(context: Context) {
         const val MODE_SEMI = 1
         const val MODE_MANUAL = 2
         const val MODE_AUTO = 3
+        /** 首次没有历史选择时的工作模式。用户切换后由 workMode 持久化。 */
+        const val DEFAULT_WORK_MODE = MODE_AUTO
+        /** 首次没有历史选择时开启自动走子开关；用户可明确关闭并持久化。 */
+        const val DEFAULT_AUTO_PLAY = true
         private const val KEY_BALL_X = "overlay_ball_x"
         private const val KEY_BALL_Y = "overlay_ball_y"
         private const val KEY_BALL_SCALE = "overlay_ball_scale"

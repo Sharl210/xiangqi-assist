@@ -62,8 +62,9 @@ jobs:
           path: app/build/outputs/apk/*/release/*.apk
           if-no-files-found: error
 
-      # Release APKs are built on the GitHub runner so the public workflow does not need
-      # the maintainer's private signing key. They use the public-checkout debug key.
+      # Tag/manual release assets are signed with the encrypted release key prepared above.
+      # Pushes and pull requests without the secret remain buildable with the public-checkout
+      # debug key, but are not treated as distributable release assets.
       - name: Prepare v1.1 release assets
         if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/tags/v1.1'
         run: |
