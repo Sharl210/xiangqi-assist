@@ -76,7 +76,7 @@ enum class OverlayAction {
     CYCLE_MODE,
     /** 自动走子开关 */
     TOGGLE_AUTO,
-    /** 仿真模式开关（随机偏移/随机延迟/预案预选） */
+    /** 仿真模式开关（随机偏移/候选起点预选）；点击式落子间隔由独立策略始终随机化 */
     TOGGLE_SIM,
     /** 候选数量档位 */
     CYCLE_CANDIDATE_COUNT,

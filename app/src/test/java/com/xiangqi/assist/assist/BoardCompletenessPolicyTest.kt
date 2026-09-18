@@ -18,6 +18,27 @@ class BoardCompletenessPolicyTest {
     }
 
     @Test
+    fun `equal piece count with several moved squares is accepted`() {
+        val before = AssistBoard.canonicalStart()
+        val observed = AssistBoard.clone(before)
+        // 日志回归：用户误切走棋方期间，真实棋局已经走了数步；模型每次都完整识别到
+        // 32 子，但旧的“局部棋位不一致”门会无限拒绝。完整盘面不能被缺子门拦截。
+        observed[5][0] = observed[6][0]
+        observed[6][0] = Piece.EMPTY
+        observed[4][2] = observed[3][2]
+        observed[3][2] = Piece.EMPTY
+        assertNull(BoardCompletenessPolicy.rejectionReason(before, observed))
+    }
+
+    @Test
+    fun `class-only change is left to tracker consistency window`() {
+        val before = AssistBoard.canonicalStart()
+        val observed = AssistBoard.clone(before)
+        observed[0][0] = Piece.BMA
+        assertNull(BoardCompletenessPolicy.rejectionReason(before, observed))
+    }
+
+    @Test
     fun `single missing rook is rejected instead of sent to engine`() {
         val before = AssistBoard.canonicalStart()
         val missing = AssistBoard.clone(before)
@@ -37,11 +58,13 @@ class BoardCompletenessPolicyTest {
     }
 
     @Test
-    fun `severe collapse is rejected even when almost all pieces disappeared`() {
+    fun `severe collapse is rejected when a retained subset proves massive loss`() {
         val before = AssistBoard.canonicalStart()
         val collapsed = Array(10) { IntArray(9) }
-        collapsed[9][4] = Piece.WSHUAI
-        collapsed[0][4] = Piece.BJIANG
+        // 保留若干原格棋子，模拟旧棋面被逐步漏检；这与“完全不同的新残局”不同。
+        for ((x, y) in listOf(0 to 0, 1 to 0, 2 to 0, 0 to 3, 2 to 3, 0 to 6)) {
+            collapsed[y][x] = before[y][x]
+        }
         assertNotNull(BoardCompletenessPolicy.rejectionReason(before, collapsed))
     }
 

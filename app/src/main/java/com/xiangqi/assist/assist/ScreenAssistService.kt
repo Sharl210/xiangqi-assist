@@ -76,7 +76,9 @@ class ScreenAssistService : Service() {
         // 一是那 500ms 无条件白等（面板大多没压住棋盘），二是**透明并不能让点击穿透**——
         // 透明窗口照样接收触摸，棋盘收不到点击，落子自然失败。
         // 现在改为 suppressOverlayForLanding()：收起面板 + 全程不可触摸，且无需提前等待。
-        /** 落子动作之间、以及动作与恢复之间的缓冲 */
+        /** 点击式落子：起点与终点之间的基准间隔；每手按0.3～1.0倍随机化。 */
+        private const val AUTO_TAP_GAP_BASE_MS = MoveTimingPolicy.DEFAULT_TAP_GAP_MS
+        /** 手势完成后给棋盘动画留出的恢复缓冲。 */
         private const val AUTO_TAP_RESTORE_MS = 200L
         /** 建议成熟阈值：最佳着法连续未变化的时长，超过即视为"定着"（绿箭头） */
         private const val SUGGEST_STABLE_MS = 1200L
@@ -1572,6 +1574,13 @@ class ScreenAssistService : Service() {
             val after = AssistBoard.engineUnsafeReason(canonical, !landingRebaseRedGo)
             return if (before == null || after == null) null else before
         }
+        if (resumeRebasePending) {
+            // 暂停后的首帧只建立观察基线；外部应用可能已经改变轮次。
+            // 两种轮次只要有一种对引擎安全就放行，避免旧基线的轮次把新盘面锁死。
+            val before = AssistBoard.engineUnsafeReason(canonical, currentRedGo)
+            val after = AssistBoard.engineUnsafeReason(canonical, !currentRedGo)
+            return if (before == null || after == null) null else before
+        }
         val legalityRedGo = forcedTurnFromCheck(canonical)
             ?: if (currentCanonical == null) mySideIsRed() else currentRedGo
         return AssistBoard.engineUnsafeReason(canonical, legalityRedGo)
@@ -1892,6 +1901,9 @@ class ScreenAssistService : Service() {
         // 识别在 worker 线程；所有业务状态只在主线程提交。模式/暂停若已变化，旧结果丢弃。
         mainHandler.post {
             if (epoch != recognitionEpoch) return@post
+            // 重建/暂停后的首张稳定画面只建立新观察基线，不把保留的旧展示棋面
+            // 当作本次“上一局面”参与差分或轮次推断。
+            val isFreshBaseline = resumeRebasePending || landingRebasePending
             // 该确认可能早于无障碍回调排队；一旦落子事务已经建立，普通确认
             // 不得再写 currentFen/轮次或启动分析。回执专属处理会消费这张画面。
             val landing = landingState
@@ -1932,8 +1944,8 @@ class ScreenAssistService : Service() {
                 resumeRebasePending = false
                 analysisCycleGate.invalidate()
             }
-            val previousBoard = currentCanonical
-            val previousFen = currentFen
+            val previousBoard = if (isFreshBaseline) null else currentCanonical
+            val previousFen = if (isFreshBaseline) "" else currentFen
 
             // ==================== 轮次（不再由差分推断） ====================
             // 1) 我方刚落子并拿到回执时，轮次已经被显式切到对方；此后屏幕上出现的
@@ -3212,7 +3224,7 @@ class ScreenAssistService : Service() {
     private fun toggleSim() {
         val on = !config.simEnabled
         config.simEnabled = on
-        setStatus(if (on) "仿真：已开启（随机偏移/延迟/预案试选）" else "仿真：已关闭")
+        setStatus(if (on) "仿真：已开启（随机偏移/预案试选；点击间隔始终随机）" else "仿真：已关闭（点击间隔仍按基准随机）")
         postRender()
     }
 
@@ -3690,7 +3702,7 @@ class ScreenAssistService : Service() {
                 engineReady = engineReady,
                 searching = searching,
                 settled = searchSettled,
-                boardPresent = currentFen.isNotEmpty(),
+                boardPresent = currentFen.isNotEmpty() && !resumeRebasePending && !landingRebasePending,
                 myTurn = currentRedGo == mySideIsRed(),
             )
         )
@@ -3865,6 +3877,7 @@ class ScreenAssistService : Service() {
      */
     private fun autoBlockReason(): String? {
         if (paused) return "已暂停"
+        if (resumeRebasePending || landingRebasePending) return "正在重新确认棋面"
         if (autoMoveCooldownUntil > System.currentTimeMillis()) {
             val left = ((autoMoveCooldownUntil - System.currentTimeMillis()) / 1000L).coerceAtLeast(1L)
             return "落子失败冷却中（${left}s后自动恢复）"
@@ -4028,7 +4041,7 @@ class ScreenAssistService : Service() {
         // 回执处理并发消费同一张图，重新产生重复落子。
         if (landingState != null) return
 
-        if (paused || manualMode || refresh.isActive) return
+        if (paused || manualMode || refresh.isActive || resumeRebasePending || landingRebasePending) return
         val grid = sessionGrid ?: return
         val pieces = currentPieces ?: return
         val fen = currentFen
@@ -4120,7 +4133,7 @@ class ScreenAssistService : Service() {
         )
         // 超时后的第一原则是“先确认屏幕现在到底是什么局面”，而不是复用旧建议。
         // 保留“落子前”和“预期落子后”两份只读快照，仅用于下一张真实画面决定轮次；
-        // 当前显示棋面本身清空，强制取帧阶段重新走完整的识别→确认→分析链。
+        // 但继续保留当前已确认棋面作为展示基线，避免恢复期间悬浮窗突然变成空棋盘。
         if (abandoned != null) {
             landingRebasePending = true
             landingRebasePreBoard = AssistBoard.clone(abandoned.preBoard)
@@ -4133,10 +4146,9 @@ class ScreenAssistService : Service() {
         resetSuggestionState(newAnalysisCycle = false)
         adviceBoard = null
         lastSeen = null
-        currentCanonical = null
-        currentPieces = null
-        currentFen = ""
-        resumeRebasePending = true
+        // 保留上一张已确认棋面作为暂时显示基线；它只用于用户可见连续性，
+        // 不会被重新识别流程当作当前事实写回，也不会阻塞下一张新盘面。
+        // 重新识别期间清除建议和回执快照，防止沿用过期着法。
         tracker.reset(landingRebaseRedGo)
         reanalyzeAfterLandingFailure = true
         autoLastUcci = null
@@ -4300,7 +4312,12 @@ class ScreenAssistService : Service() {
         val (cw, ch) = cellSize()
         val target = if (sim && cw > 0f && ch > 0f)
             AutoMovePlanner.applyJitter(plan, cw, ch, random) else plan
-        val tapDelay = if (sim) 50L + random.nextInt(451).toLong() else 220L
+        val tapGapMs = MoveTimingPolicy.randomizedTapGapMs(AUTO_TAP_GAP_BASE_MS, random)
+        trace(
+            "MOVE_TIMING",
+            "base=$AUTO_TAP_GAP_BASE_MS gap=$tapGapMs " +
+                "factor=${"%.3f".format(MoveTimingPolicy.factorOf(tapGapMs, AUTO_TAP_GAP_BASE_MS))}"
+        )
 
         // 绿色最终箭头：如果起点已经被蓝色候选预选过，就只补一下终点，
         // 不再点一次起点（否则会把选中取消）。拖动式始终用完整手势。
@@ -4348,11 +4365,11 @@ class ScreenAssistService : Service() {
         previewGestureToken++
         previewGestureInFlight = false
         lastPreviewDispatchAt = 0L
-        prepareAutoMoveChannel(pending, tapDelay)
+        prepareAutoMoveChannel(pending, tapGapMs)
     }
 
     /** 每一手只执行一次通道保险；失败时保留请求并等待周期恢复，不发出半截手势。 */
-    private fun prepareAutoMoveChannel(pending: PendingAutoMove, tapDelay: Long) {
+    private fun prepareAutoMoveChannel(pending: PendingAutoMove, tapGapMs: Long) {
         if (pendingAutoMove !== pending || stopping || overlayClosed || paused || manualMode ||
             (pending.requireAutoSwitch && !autoPlayOn)) return
         if (currentFen != pending.fen) {
@@ -4364,20 +4381,20 @@ class ScreenAssistService : Service() {
         val key = AutoChannelRestartPolicy.moveTransactionKey(pending.fen, pending.target.ucci)
         trace("MOVE_PREPARE", "key=${pending.target.ucci} fen=${pending.fen} already=${lastPreparedMoveKey == key}")
         if (lastPreparedMoveKey == key) {
-            dispatchAutoMoveNow(pending, tapDelay, pending.requireAutoSwitch)
+            dispatchAutoMoveNow(pending, tapGapMs, pending.requireAutoSwitch)
             return
         }
         lastPreparedMoveKey = key
         restartAutoChannelSilently(requireAutoSwitch = pending.requireAutoSwitch) { connected ->
             if (pendingAutoMove !== pending) return@restartAutoChannelSilently
             if (connected) {
-                dispatchAutoMoveNow(pending, tapDelay, pending.requireAutoSwitch)
+                dispatchAutoMoveNow(pending, tapGapMs, pending.requireAutoSwitch)
             } else {
                 // 不清除用户的自动开关；无障碍恢复线程会继续尝试，稍后再重试这一手。
                 lastPreparedMoveKey = null
                 ensureAccessibilityForAutoPlay(openSettings = false, silent = true)
                 mainHandler.postDelayed({
-                    prepareAutoMoveChannel(pending, tapDelay)
+                    prepareAutoMoveChannel(pending, tapGapMs)
                 }, ACCESSIBILITY_RECOVERY_INTERVAL_MS)
             }
         }
@@ -4386,7 +4403,7 @@ class ScreenAssistService : Service() {
     /** 通道保险通过后重新核对局面，再创建并派发真实落子事务。 */
     private fun dispatchAutoMoveNow(
         pending: PendingAutoMove,
-        tapDelay: Long,
+        tapGapMs: Long,
         requireAutoSwitch: Boolean,
     ) {
         if (stopping || overlayClosed || paused || manualMode || (requireAutoSwitch && !autoPlayOn)) return
@@ -4409,7 +4426,7 @@ class ScreenAssistService : Service() {
             lastPreparedMoveKey = null
             ensureAccessibilityForAutoPlay(openSettings = false, silent = true)
             mainHandler.postDelayed({
-                prepareAutoMoveChannel(pending, tapDelay)
+                prepareAutoMoveChannel(pending, tapGapMs)
             }, ACCESSIBILITY_RECOVERY_INTERVAL_MS)
             return
         }
@@ -4496,7 +4513,7 @@ class ScreenAssistService : Service() {
                         target.fromY,
                         target.toX,
                         target.toY,
-                        tapDelay,
+                        tapGapMs,
                     ) { completed ->
                         mainHandler.post {
                             if (completed) finishLandingGesture(token)

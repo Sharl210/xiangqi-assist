@@ -75,8 +75,9 @@ class AssistConfig(context: Context) {
         set(value) { sp.edit().putInt(KEY_THROTTLE, value.coerceIn(0, 10000)).apply() }
 
     /**
-     * 仿真模式：自动走子时加入"随机偏移 + 随机延迟 + 预案预选"，
-     * 让落子看起来更像人在下（默认开）。
+     * 仿真模式：自动走子时加入"随机偏移 + 预案预选"，
+     * 让落子点保持轻微自然变化（默认开）。点击式起点到终点的反应间隔
+     * 由 MoveTimingPolicy 独立按基准的30%～100%随机化，不随仿真开关关闭。
      */
     var simEnabled: Boolean
         get() = sp.getBoolean(KEY_SIM, true)
