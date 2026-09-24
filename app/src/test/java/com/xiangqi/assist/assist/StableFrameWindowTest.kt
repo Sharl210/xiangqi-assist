@@ -11,72 +11,52 @@ class StableFrameWindowTest {
     private fun frame(color: Int, at: Long): Frame =
         Frame(8, 8, IntArray(64) { 0xFF000000.toInt() or color }, at)
 
-    @Test
-    fun `eight stable samples release one key frame`() {
+    @Test fun `eight stable samples release one key frame and no early frame`() {
         val window = StableFrameWindow()
         repeat(7) { i ->
-            val result = window.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 250L)
+            val result = window.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 125L)
             assertFalse(result.ready)
+            assertEquals(i + 1, result.stableCount)
         }
-        val result = window.accept(frame(0x101010, 7), 1, 2750)
+        val result = window.accept(frame(0x101010, 7), 1, 1875L)
         assertTrue(result.ready)
         assertEquals(8, result.stableCount)
         assertNotNull(result.selected)
     }
 
-    @Test
-    fun `stable window advances one sample after motion instead of restarting at zero`() {
+    @Test fun `window advances through motion and waits for eight consecutive new samples`() {
         val window = StableFrameWindow()
-        repeat(8) { i -> window.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 250L) }
-
-        // 第9个样本发生变化：窗口变成“旧7帧+新1帧”，不是清空为0。
-        val changed = window.accept(frame(0xFFFFFF, 8), 1, 3000)
+        repeat(8) { i -> window.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 125L) }
+        val changed = window.accept(frame(0xFFFFFF, 8), 1, 2000L)
         assertFalse(changed.ready)
         assertTrue(changed.restartedByChange)
         assertEquals(8, changed.stableCount)
 
-        // 新画面只需再提供7个样本；第8个新样本与前7个共同组成稳定窗口。
-        var result: StableFrameWindow.Result? = null
-        for (i in 9..14) {
-            result = window.accept(frame(0xFFFFFF, i.toLong()), 1, 3000L + (i - 8) * 250L)
-            assertFalse(result.ready)
-        }
-        result = window.accept(frame(0xFFFFFF, 15), 1, 4750)
-        assertTrue(result.ready)
-        assertEquals(8, result.stableCount)
-        assertNotNull(result.selected)
-        result = window.accept(frame(0xFFFFFF, 16), 1, 5000)
-        // 后续静止样本不会重复推理。
-        assertFalse(result.ready)
-        assertNull(result.selected)
-
-        // 重新构造一次，精确验证第8个新样本释放。
-        val second = StableFrameWindow()
-        repeat(8) { i -> second.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 250L) }
-        second.accept(frame(0xFFFFFF, 8), 1, 3000)
         var releasedAt = -1
-        for (i in 9..16) {
-            val r = second.accept(frame(0xFFFFFF, i.toLong()), 1, 3000L + (i - 8) * 250L)
-            if (r.ready) releasedAt = i
+        for (i in 9..15) {
+            val result = window.accept(frame(0xFFFFFF, i.toLong()), 1, 2000L + (i - 8) * 125L)
+            if (result.ready) releasedAt = i
+            if (i < 15) assertFalse(result.ready)
         }
         assertEquals(15, releasedAt)
+        val stableAgain = window.accept(frame(0xFFFFFF, 16), 1, 3000L)
+        assertFalse(stableAgain.ready)
+        assertNull(stableAgain.selected)
     }
 
-    @Test
-    fun `rearm retries the current stable window on the next sample`() {
+    @Test fun `rearm retries current stable window on next sample`() {
         val window = StableFrameWindow()
-        repeat(8) { i -> window.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 250L) }
+        repeat(8) { i -> window.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 125L) }
         window.rearm()
-        val result = window.accept(frame(0x101010, 8), 1, 3000)
+        val result = window.accept(frame(0x101010, 8), 1, 2000L)
         assertTrue(result.ready)
         assertEquals(8, result.stableCount)
     }
 
-    @Test
-    fun `epoch and timeout start a fresh window`() {
+    @Test fun `epoch and sample gap start fresh window`() {
         val window = StableFrameWindow()
-        window.accept(frame(0x101010, 0), 1, 1000)
-        val next = window.accept(frame(0x101010, 1), 2, 4000)
+        window.accept(frame(0x101010, 0), 1, 1000L)
+        val next = window.accept(frame(0x101010, 1), 2, 4000L)
         assertEquals(1, next.stableCount)
         assertFalse(next.ready)
     }

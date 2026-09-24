@@ -1,5 +1,6 @@
 package com.xiangqi.assist.assist
 
+import android.app.Activity
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -62,15 +63,16 @@ class ScreenAssistService : Service() {
         const val ACTION_START = "com.xiangqi.assist.assist.START"
         const val EXTRA_RESULT_CODE = "result_code"
         const val EXTRA_RESULT_DATA = "result_data"
+        /** Activity 发起一次暂停后/前台回归后的重新录屏授权。 */
+        const val EXTRA_RESUME_CAPTURE = "resume_capture"
+        const val EXTRA_REQUEST_CAPTURE_RESUME = "request_capture_resume"
         private const val CHANNEL_ID = "assist_foreground"
         private const val NOTIF_ID = 1001
-        /**
-         * 录屏流采样周期：每秒4帧。连续8帧稳定后只挑一帧送入模型。
-         */
+        /** 录屏流采样周期与稳定门限由策略统一提供：每秒8个样本，连续8个样本稳定后只挑一帧送入模型。 */
         private const val STREAM_SAMPLE_PERIOD_MS = FrameStabilityPolicy.SAMPLE_PERIOD_MS
         private const val STREAM_STABLE_FRAME_COUNT = FrameStabilityPolicy.REQUIRED_STABLE_FRAMES
-        /** 蓝色候选起点预选的最小间隔（同一 UCCI 起点已由策略去重）。 */
-        private const val CANDIDATE_PREVIEW_MIN_GAP_MS = 150L
+        /** 蓝色候选箭头的起点预选切换目标时，每次随机等待 750–1250ms。 */
+        private const val CANDIDATE_PREVIEW_MIN_GAP_MS = CandidatePreviewPolicy.MIN_PREVIEW_SWITCH_GAP_MS
         /** 落子前提前把悬浮窗调透明的时间（避免点击动作按到悬浮窗上） */
         // 说明：原先"落子前提前 500ms 把悬浮窗调透明"的做法已删除。
         // 一是那 500ms 无条件白等（面板大多没压住棋盘），二是**透明并不能让点击穿透**——
@@ -105,8 +107,10 @@ class ScreenAssistService : Service() {
         /** 滑动落子后等待棋盘稳定的时间（够触发一次重绘即可，不必等太久） */
         private const val SWIPE_SETTLE_MS = 220L
 
-        /** 连续这么多次识别失败后才丢弃网格、回全屏重找（避免裁剪/全屏来回抖动） */
+        /** 连续这么多次非连续样本识别异常后才丢弃裁剪网格。 */
         private const val CROP_RESET_MISSES = 6
+        /** 连续识别异常后复位网格的阈值，与要求的八帧稳定门分开维护。 */
+        private const val STREAM_ANOMALY_GRID_RESET_MISSES = 6
 
         /** 自动走子要求的画面新鲜度：最近一次成功定位距今不得超过该毫秒数 */
         private const val AUTO_FRESH_MS = 1500L
@@ -121,9 +125,9 @@ class ScreenAssistService : Service() {
         private const val AUTO_SEMI_VALID_MS = 15 * 60 * 1000L
 
         /** 状态监督间隔 */
-        private const val REFRESH_WATCHDOG_TICK_MS = 800L
+        private const val REFRESH_WATCHDOG_TICK_MS = 400L
         /** 录屏/识别/落子管线独立监督的心跳间隔；不依赖普通阶段监督器是否仍在排队。 */
-        private const val PIPELINE_WATCHDOG_TICK_MS = 600L
+        private const val PIPELINE_WATCHDOG_TICK_MS = 250L
         /** 同一条“已整屏重新定位”提示的最小重复间隔，避免周期性恢复刷屏 */
         private const val VISION_RESET_STATUS_INTERVAL_MS = 30_000L
         /** 回执超时后给重新建基线保留的最大等待时间。 */
@@ -131,7 +135,7 @@ class ScreenAssistService : Service() {
 
         /**
          * 局面变化后的分析防抖窗口：只用来合并同一瞬间的重复提交，
-         * 不能变成“为了看起来稳”的固定等待（旧值 250ms 会直接吃掉响应预算）。
+         * 不能变成“为了看起来稳”的固定等待（旧值 125ms 只是采样间隔，不是额外等待）。
          */
         private const val BOARD_CHANGE_DEBOUNCE_MS = 30L
 
@@ -142,6 +146,7 @@ class ScreenAssistService : Service() {
         private const val FULL_VISION_RECHECK_MS = 1800L
         /** 连续录屏输出的最长边；模型只需640输入，降低全屏拷贝和内存压力。 */
         private const val CAPTURE_MAX_DIMENSION = 1440
+
         /** 对方回合的最大搜索深度（再深也没人看，纯烧 CPU） */
         private const val OPPONENT_MAX_DEPTH = 12
 
@@ -159,19 +164,112 @@ class ScreenAssistService : Service() {
      */
     private enum class CaptureDemand { OFF, ONE_SHOT, CONTINUOUS }
 
+    /** 暂停后重新申请录屏时，恢复哪一种用户意图。 */
+    private enum class CaptureResumeIntent { NONE, USER_CONTINUE, FOREGROUND_RETURN }
+
     /** 供 Activity 绑定调用的接口 */
     inner class CastBinder : Binder() {
         fun service(): ScreenAssistService = this@ScreenAssistService
     }
 
-    fun isCapturing(): Boolean = mediaProjection != null && virtualDisplay != null
+    fun isCapturing(): Boolean = !paused && capturePipelineActive &&
+        mediaProjection != null && imageReader != null && virtualDisplay != null
+
+    fun isProjectionAuthorized(): Boolean = mediaProjection != null && virtualDisplay != null
+
+    /** 当前处于断开Surface的暂停态；不会继续向ImageReader写入画面。 */
+    fun isCaptureThrottled(): Boolean = paused && retainProjectionWhilePaused &&
+        isProjectionAuthorized() && !capturePipelineActive
+
+    /** 会话是否仍准备完成；独立于录屏授权与当前帧管线。 */
+    fun isPrepared(): Boolean = preparedSession && !stopping && !overlayClosed
+
+    /** 主按钮在异步关闭末段仍保持“已准备/红色”，防止误触再准备。 */
+    fun hasPreparedIntent(): Boolean = preparedIntent
+
+    fun isAccessibilityShutdownPending(): Boolean = closePending || accessibilityShutdownInFlight
+
+    fun isCaptureResumePending(): Boolean = captureResumePending
 
     /** 用户可见的运行意图；切回本应用导致的临时安全暂停仍显示为可“一键关闭”。 */
     fun isRunning(): Boolean = AssistRunControlPolicy.hasRunningIntent(
-        prepared = isCapturing(),
+        prepared = isPrepared(),
         paused = paused,
         foregroundWasRunning = foregroundPauseSnapshot?.wasRunning == true,
     )
+
+    /** 暂停后由 Activity 重新取得系统录屏授权，再把授权结果交回服务。 */
+    fun requestCaptureResume(): Boolean {
+        if (!isPrepared() || !captureResumePending) return false
+        return true
+    }
+
+    /** 接收授权结果但不立即启动 MediaProjection，避免控制页画面进入识别流。 */
+    fun acceptCaptureGrant(resultCode: Int, data: Intent?): Boolean {
+        val grantData = data ?: return false
+        if (!isPrepared() || !captureResumePending || resultCode != Activity.RESULT_OK) return false
+        pendingCaptureGrant = ResumeCapturePolicy.Grant(resultCode, grantData)
+        captureResumePending = false
+        resumeAuthorizationDenied = false
+        setStatus("录屏权限已恢复，等待回到原棋盘应用后继续识别")
+        postRender()
+        maybeStartCaptureAfterForegroundReturn()
+        return true
+    }
+
+    /** 用户拒绝续录时保留暂停会话和前台监听，供其随后明确重新尝试。 */
+    fun rejectCaptureGrant() {
+        if (!isPrepared()) return
+        pendingCaptureGrant = null
+        captureResumePending = false
+        resumeAuthorizationDenied = true
+        setStatus("未恢复录屏权限，仍保持暂停；可在悬浮窗内再次点击继续")
+        postRender()
+    }
+
+    private fun maybeStartCaptureAfterForegroundReturn() {
+        val snapshot = foregroundPauseSnapshot ?: return
+        val target = snapshot.resumePackage
+        val grant = pendingCaptureGrant ?: return
+        if (!isPrepared() || paused.not() ||
+            !ForegroundPausePolicy.isResumeTarget(snapshot, foregroundBaselinePackage) ||
+            !ResumeCapturePolicy.shouldStartCapture(grant, target, foregroundBaselinePackage)
+        ) return
+        pendingCaptureGrant = null
+        resumeAuthorizationDenied = false
+        val shouldResume = snapshot.wasRunning
+        if (!isProjectionAuthorized()) {
+            // 仅系统已结束旧投影时才使用新令牌；调用前已确认目标棋盘处于前台。
+            startForegroundInternal(resumeCapture = true)
+            startCapture(grant.resultCode, grant.data, resumeCapture = true)
+        }
+        if (!isProjectionAuthorized()) {
+            captureResumePending = true
+            foregroundPauseSnapshot = snapshot
+            refreshForegroundServiceTypeForCaptureState()
+            setStatus("系统未能恢复屏幕共享；请再次点击继续授权")
+            postRender()
+            return
+        }
+        if (shouldResume) {
+            // 目标棋盘已在前台，接回Surface后清空旧棋面；后续新帧建立基线。
+            if (!isCapturing() && !resumeRuntime(rebaseBoard = true, userInitiated = false)) {
+                foregroundPauseSnapshot = snapshot
+                captureResumePending = true
+                setStatus("授权已恢复但屏幕帧未接回；请再次点击继续")
+                postRender()
+                return
+            }
+            foregroundPauseSnapshot = null
+            resumeCaptureWhenTargetReturns = false
+            setStatus("屏幕画面已恢复，正在从新帧重新确认棋面…")
+        } else {
+            foregroundPauseSnapshot = null
+            resumeCaptureWhenTargetReturns = false
+            setStatus("屏幕授权已恢复；仍保持暂停，点击悬浮窗『继续』开始")
+        }
+        postRender()
+    }
 
     /** 最近一次状态文本（供辅助页显示） */
     fun getStatusText(): String = lastStatusText
@@ -179,38 +277,176 @@ class ScreenAssistService : Service() {
     /** 自动走子是否开启（供辅助页显示）；配置和运行态只允许在用户明确关闭时变为 false。 */
     fun isAutoPlayOn(): Boolean = autoPlayOn || config.autoPlay
 
-    /** 用户从应用控制页明确点击“一键启动”。 */
+    /** 用户从应用控制页请求继续；保留授权时直接接回Surface，否则发起系统授权。 */
     fun requestStartFromControlEntry(): Boolean {
-        if (!isCapturing()) return false
+        if (!isPrepared()) return false
         mainHandler.post {
-            if (AssistRunControlPolicy.canStart(
-                    prepared = isCapturing(),
-                    paused = paused,
-                    foregroundWasRunning = foregroundPauseSnapshot?.wasRunning == true,
-                )
-            ) toggleRun()
-        }
-        return true
-    }
-
-    /** 用户从应用控制页明确点击“一键关闭”；保留录屏授权环境，停止识别、计算和落子。 */
-    fun requestStopFromControlEntry(): Boolean {
-        if (!isCapturing()) return false
-        mainHandler.post {
-            if (AssistRunControlPolicy.canStop(
-                    prepared = isCapturing(),
+            if (captureResumePending || !isProjectionAuthorized()) {
+                requestCaptureAuthorization(CaptureResumeIntent.USER_CONTINUE)
+            } else if (AssistRunControlPolicy.canStart(
+                    prepared = isPrepared(),
                     paused = paused,
                     foregroundWasRunning = foregroundPauseSnapshot?.wasRunning == true,
                 )
             ) {
-                trace("RUN_STOP_FROM_APP", "landing=${landingState?.stage} searching=$searching")
-                foregroundPauseSnapshot = null
-                pauseRuntime(clearAnalysis = true)
-                setStatus("当前已停止（不取帧、不识别、不计算）\n点『开始』后重新建立棋面基线")
+                toggleRun()
+            }
+        }
+        return true
+    }
+
+    /** 用户从应用控制页明确点击“一键关闭”：关闭整个已准备会话。 */
+    fun requestStopFromControlEntry(): Boolean {
+        if (!isPrepared() || accessibilityShutdownInFlight) return false
+        accessibilityShutdownInFlight = true
+        closePending = true
+        mainHandler.post {
+            if (AssistRunControlPolicy.canStop(
+                    prepared = isPrepared(),
+                    paused = paused,
+                    foregroundWasRunning = foregroundPauseSnapshot?.wasRunning == true,
+                )
+            ) {
+                trace("RUN_CLOSE_FROM_APP", "landing=${landingState?.stage} searching=$searching")
+                closeSessionInternal("正在关闭识别、屏幕共享与悬浮窗…")
+                revokeOwnAccessibilityAfterClose("已关闭识别、屏幕共享与悬浮窗")
+            } else {
+                closePending = false
+                accessibilityShutdownInFlight = false
                 postRender()
             }
         }
         return true
+    }
+
+    /** 系统返回辅助页后重新核验待关闭的本应用无障碍服务。 */
+    fun reconcileAccessibilityShutdown(): Boolean {
+        if (!closePending || accessibilityShutdownInFlight) return !closePending
+        val disabled = !AssistAccessibilityService.isEnabledInSettings(this) &&
+            !AssistAccessibilityService.isConnected()
+        if (disabled) {
+            closePending = false
+            preparedIntent = false
+            setStatus("本应用屏幕操作通道已关闭")
+            postRender()
+            stopSelf()
+            return true
+        }
+        return false
+    }
+
+    private fun revokeOwnAccessibilityAfterClose(successMessage: String) {
+        val instance = AssistAccessibilityService.instance
+        if (instance != null) {
+            instance.disableSelfForSessionClose()
+            mainHandler.postDelayed({
+                val disabled = !AssistAccessibilityService.isEnabledInSettings(this) &&
+                    !AssistAccessibilityService.isConnected()
+                closePending = !disabled
+                accessibilityShutdownInFlight = false
+                if (disabled) preparedIntent = false
+                setStatus(
+                    if (disabled) "$successMessage；本应用屏幕操作通道已关闭"
+                    else "识别、录屏与悬浮窗已关闭；请到系统无障碍设置关闭本应用的屏幕操作通道"
+                )
+                if (!disabled) runCatching { startActivity(AssistAccessibilityService.openSettingsIntent()) }
+                if (!disabled) postRender()
+                if (disabled) {
+                    cancelForegroundNotification()
+                    stopSelf()
+                }
+            }, 500L)
+            return
+        }
+        if (!AssistAccessibilityService.isEnabledInSettings(this)) {
+            closePending = false
+            preparedIntent = false
+            accessibilityShutdownInFlight = false
+            setStatus("$successMessage；本应用屏幕操作通道已关闭")
+            cancelForegroundNotification()
+            stopSelf()
+            return
+        }
+        if (RootHelper.isRooted()) {
+            Thread {
+                val result = RootHelper.disableAccessibility(this)
+                mainHandler.post {
+                    val disabled = result.ok && !AssistAccessibilityService.isEnabledInSettings(this)
+                    closePending = !disabled
+                    accessibilityShutdownInFlight = false
+                    if (disabled) preparedIntent = false
+                    setStatus(
+                        if (disabled) "$successMessage；本应用屏幕操作通道已关闭"
+                        else "识别、录屏与悬浮窗已关闭；本应用无障碍服务未能自动关闭，请到系统无障碍设置完成"
+                    )
+                    if (!disabled) runCatching { startActivity(AssistAccessibilityService.openSettingsIntent()) }
+                    postRender()
+                    if (disabled) {
+                        cancelForegroundNotification()
+                        stopSelf()
+                    }
+                }
+            }.apply { isDaemon = true }.start()
+            return
+        }
+        closePending = true
+        accessibilityShutdownInFlight = false
+        setStatus("识别、录屏与悬浮窗已关闭；请到系统无障碍设置关闭本应用的屏幕操作通道")
+        runCatching { startActivity(AssistAccessibilityService.openSettingsIntent()) }
+        postRender()
+    }
+
+    /** 仅投影会话已失效或 Surface 无法重连时，才向控制页请求新的系统录屏授权。 */
+    private fun requestCaptureAuthorization(intent: CaptureResumeIntent) {
+        if (!isPrepared() || stopping || overlayClosed) return
+        // 已暂停的用户只是切回原目标应用时，优先直接重接保留的授权，不重复弹系统授权页。
+        if (intent == CaptureResumeIntent.FOREGROUND_RETURN && isProjectionAuthorized()) {
+            val snapshot = foregroundPauseSnapshot ?: return
+            if (!snapshot.wasRunning || !snapshot.suspendedByForeground) return
+            if (foregroundBaselinePackage != snapshot.resumePackage) return
+            if (resumeRuntime(rebaseBoard = true, userInitiated = false)) {
+                foregroundPauseSnapshot = null
+                resumeCaptureWhenTargetReturns = false
+                setStatus("已回到原棋盘应用，正在从新帧重新建立棋面基线…")
+                postRender()
+                return
+            }
+            // 如果授权尚存但Surface无法接回，退出旧会话后继续走系统重授权流程。
+            trace("CAPTURE_RESUME_REAUTHORIZE", "reason=foreground_surface_reconnect_failed")
+        }
+        // 用户手动继续也要在重新取得录屏授权后回到原象棋应用再恢复，
+        // 否则授权页/控制页自身会被录进棋盘识别流。
+        if (intent == CaptureResumeIntent.USER_CONTINUE && foregroundPauseSnapshot == null) {
+            val target = foregroundBaselinePackage?.trim().orEmpty()
+            if (target.isNotEmpty() && target != packageName) {
+                foregroundPauseSnapshot = ForegroundPausePolicy.Snapshot(
+                    wasRunning = true,
+                    resumePackage = target,
+                )
+            }
+        }
+        captureResumePending = true
+        captureResumeIntent = intent
+        resumeCaptureWhenTargetReturns = foregroundPauseSnapshot?.wasRunning == true
+        resumeAuthorizationDenied = false
+        pendingCaptureGrant = null
+        if (resumeCaptureWhenTargetReturns) {
+            foregroundBaselinePackage = packageName
+        }
+        val reason = if (intent == CaptureResumeIntent.FOREGROUND_RETURN) {
+            "已回到原象棋应用，请确认屏幕录制权限以恢复之前的运行状态"
+        } else {
+            "继续运行需要重新确认屏幕录制权限"
+        }
+        setStatus(reason)
+        val launch = Intent(this, com.xiangqi.assist.assist.ui.AssistActivity::class.java).apply {
+            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+            putExtra(EXTRA_REQUEST_CAPTURE_RESUME, true)
+        }
+        // 已打开控制页时由其 onResume/onNewIntent 发起授权；后台启动失败不影响
+        // 无障碍监听，通知仍会保留恢复入口。
+        runCatching { startActivity(launch) }
+        postRender()
     }
 
     /** App 设置页实时调整小球；重建窗口以便宽高、文字和触摸区域一起按同一比例生效。 */
@@ -303,6 +539,13 @@ class ScreenAssistService : Service() {
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
+    /** 该对象一旦停止即不可复用；暂停只有在成功断开输出Surface后才保留它。 */
+    private var mediaProjectionCallback: MediaProjection.Callback? = null
+    /** 暂停期间保留的虚拟显示：Surface 已断开，未释放，恢复时接回新ImageReader。 */
+    private var retainedPausedVirtualDisplay: VirtualDisplay? = null
+    private var capturePipelineWidth = 0
+    private var capturePipelineHeight = 0
+    private var capturePipelineDensityDpi = 0
     /** 物理屏幕尺寸与录屏输出尺寸分开保存；落子坐标最终要缩放回物理屏幕。 */
     @Volatile private var screenWidth = 0
     @Volatile private var screenHeight = 0
@@ -348,6 +591,7 @@ class ScreenAssistService : Service() {
     private data class QueuedFrame(
         val frames: List<Frame>,
         val epoch: Long,
+        val queuedAt: Long,
     )
 
     private data class DetectionObservation(
@@ -359,10 +603,25 @@ class ScreenAssistService : Service() {
     private val frameQueueLock = Any()
     private var pendingFrame: QueuedFrame? = null
     private var frameConsumeScheduled = false
+    private var frameConsumeScheduledAt = 0L
     /** 当前是否有一个批次正在执行识别；关闭时用屏障等待它退出。 */
     private val recognitionInFlight = AtomicBoolean(false)
+    private val captureKickInFlight = AtomicBoolean(false)
+    /** 仅用已消费样本的进展驱动快速探测，不将录屏回调到达误作识别完成。 */
+    @Volatile private var lastProcessedSampleAt = 0L
+    @Volatile private var lastRecognitionCompletedAt = 0L
+    @Volatile private var visionEpochStartedAt = 0L
+    @Volatile private var lastCaptureKickAt = Long.MIN_VALUE
     /** 模式/暂停/重置变化后递增；旧帧即使晚到也不能覆盖新状态。 */
     @Volatile private var recognitionEpoch = 0L
+
+    private fun recognitionQueuePendingAt(): Long = synchronized(frameQueueLock) {
+        when {
+            pendingFrame != null -> pendingFrame!!.queuedAt
+            frameConsumeScheduled && !recognitionInFlight.get() -> frameConsumeScheduledAt
+            else -> 0L
+        }
+    }
     /** 暂停期间用户可能在外部走了多手；恢复后首个稳定画面直接重建基线，不做历史差分拒绝。 */
     /** 模式/暂停/重置变化后递增；旧帧即使晚到也不能覆盖新状态。 */
     @Volatile private var resumeRebasePending = false
@@ -375,6 +634,21 @@ class ScreenAssistService : Service() {
      * 这样也避免一开机就抢 CPU/内存。
      */
     @Volatile private var paused = AssistRunControlPolicy.PREPARED_PAUSED
+    /** 本次悬浮窗会话是否仍然存在；与投影授权及帧输出状态分开管理。 */
+    @Volatile private var preparedSession = false
+    /** 已准备/关闭流程期间保持红色按钮；权限撤销核验后再确认停止。 */
+    @Volatile private var preparedIntent = false
+    /** 暂停时依据用户要求保留授权会话，并断开屏幕帧输出。 */
+    @Volatile private var retainProjectionWhilePaused = AssistRunControlPolicy.PAUSED_RETAIN_PROJECTION
+    /** 暂停期间是否有实际的帧读取输出；监督器据此识别可恢复的采集管线。 */
+    @Volatile private var capturePipelineActive = false
+    /** 暂停/前台回归后等待 Activity 重新取得 MediaProjection。 */
+    @Volatile private var captureResumePending = false
+    /** 已收到用户授权的录屏结果，但必须等目标象棋应用真正回到前台才能取屏。 */
+    @Volatile private var pendingCaptureGrant: ResumeCapturePolicy.Grant? = null
+    @Volatile private var resumeCaptureWhenTargetReturns = false
+    @Volatile private var resumeAuthorizationDenied = false
+    @Volatile private var captureResumeIntent = CaptureResumeIntent.NONE
     /**
      * 紧急手动模式：识别连续失效/产出幽灵局面时，暂停帧识别，由用户在小棋盘上
      * 点选"起点→终点"录入实战着法（自动翻转走子方）、再点一次已选中子将其删除。
@@ -386,8 +660,11 @@ class ScreenAssistService : Service() {
     @Volatile private var manualSelected: Pair<Int, Int>? = null
     /** 关闭流程闸门：置位后不再开始新的TFLite推理。 */
     @Volatile private var stopping = false
-    /** 识别与模型释放共用的生命周期状态，关闭时先置位再等待在途推理退出。 */
+    /** 关闭窗口/会话的状态闸门；媒体投影由单独的Projection生命周期管理。 */
     @Volatile private var overlayClosed = false
+    /** 关闭流程尚在撤销本应用无障碍权限；主按钮保持红色且禁止再次准备。 */
+    @Volatile private var closePending = false
+    @Volatile private var accessibilityShutdownInFlight = false
     /** 用户正在拖动/缩放悬浮窗（此时不做抓帧隐藏，免得边拖边闪） */
     @Volatile private var userDragging = false
     /** 当前取帧策略（见 CaptureDemand；手动模式/暂停=OFF，半自动=ONE_SHOT，其余=CONTINUOUS） */
@@ -399,7 +676,7 @@ class ScreenAssistService : Service() {
      */
     /** 用户主动点击“更新棋谱”的事务；自动视觉自愈不能抢占这个状态。 */
     @Volatile private var userRefreshActive = false
-    private val refresh = RefreshRequest()
+    private val refresh = RefreshRequest(timeoutMs = AssistPhase.REFRESH_TIMEOUT_MS)
 
     /** 阶段状态机（唯一状态来源） */
     @Volatile private var phase: AssistPhase.Phase = AssistPhase.Phase.PAUSED
@@ -496,6 +773,9 @@ class ScreenAssistService : Service() {
     private var currentOrientation = Orientation.STANDARD
     private var lastAnalysis: AnalysisResult? = null
     private var selectedCandidate = 0
+    @Volatile private var nextVariationRequest: NextVariationPolicy.Request? = null
+    /** 用户预先存下的“下一次我方实际落子使用非默认候选”意图；可跨对方回合和待落子阶段。 */
+    @Volatile private var nextVariationArmed = false
 
     /** 开局库候选（我方回合命中时非空；随 selectedCandidate 循环展示） */
     private var bookMoves: List<BookData>? = null
@@ -570,28 +850,37 @@ class ScreenAssistService : Service() {
                 return
             }
             val landing = landingState
+            val pendingRecognitionAt = recognitionQueuePendingAt()
             val action = PipelineHealthPolicy.evaluate(
                 PipelineHealthPolicy.Health(
                     paused = paused,
                     manualMode = manualMode,
-                    needsFrames = AssistPhase.needsBoard(refreshPhase()),
+                    needsFrames = !paused && !manualMode &&
+                        (captureDemand == CaptureDemand.CONTINUOUS || refresh.isActive),
                     landingStage = landing?.stage,
                     landingStartedAt = landing?.startedAt ?: 0L,
-                    landingCompletedAt = landing?.completedAt ?: 0L,
+                landingCompletedAt = landing?.completedAt ?: 0L,
                     lastFrameAt = lastStreamFrameAt,
                     streamStartedAt = streamStartedAt,
                     captureStartedAt = captureStartedAt,
                     lastStableAt = lastStableWindowAt,
                     lastVisionAt = lastVisionAt,
+                    visionEpochStartedAt = visionEpochStartedAt,
+                    lastRecognitionCompletedAt = lastRecognitionCompletedAt,
+                    lastProcessedSampleAt = lastProcessedSampleAt,
                     inferenceInFlight = recognitionInFlight.get(),
                     inferenceStartedAt = inferenceStartedAt,
-                    captureAlive = mediaProjection != null && imageReader != null && virtualDisplay != null,
+                    recognitionPending = pendingRecognitionAt > 0L,
+                    recognitionPendingSinceAt = pendingRecognitionAt,
+                    captureAlive = capturePipelineActive &&
+                        mediaProjection != null && imageReader != null && virtualDisplay != null,
                     lastRecoveryAt = lastPipelineRecoveryAt,
+                    lastCaptureKickAt = lastCaptureKickAt,
                     now = now,
                 )
             )
             if (action != PipelineHealthPolicy.Action.NONE) {
-                lastPipelineRecoveryAt = now
+                if (action != PipelineHealthPolicy.Action.KICK_CAPTURE) lastPipelineRecoveryAt = now
                 trace(
                     "PIPELINE_WATCHDOG_ACTION",
                     "action=$action phase=${refreshPhase()} landing=${landing?.stage} " +
@@ -600,6 +889,8 @@ class ScreenAssistService : Service() {
                         "inferenceAge=${ageOf(now, inferenceStartedAt)}"
                 )
                 when (action) {
+                    PipelineHealthPolicy.Action.KICK_CAPTURE -> kickCapture()
+
                     PipelineHealthPolicy.Action.REBASE_LANDING ->
                         retryOrStopLanding("落子核对超时，已自动重新建立基线")
 
@@ -643,7 +934,24 @@ class ScreenAssistService : Service() {
         pipelineWatchdogAt = 0L
     }
 
-    /** 识别侧自愈：丢弃裁剪网格与稳定窗口，整屏重找。等价于用户点「更新棋谱」的强制重扫。 */
+    /** Begin a new capture/recognition epoch without allowing a missing valid board to look like a stall. */
+    private fun beginVisionEpoch(now: Long = System.currentTimeMillis()) {
+        visionEpochStartedAt = now
+        lastProcessedSampleAt = 0L
+        lastRecognitionCompletedAt = 0L
+        lastVisionAt = 0L
+        lastStableWindowAt = 0L
+        lastCaptureKickAt = Long.MIN_VALUE
+        synchronized(frameQueueLock) {
+            pendingFrame = null
+            if (!recognitionInFlight.get()) {
+                frameConsumeScheduled = false
+                frameConsumeScheduledAt = 0L
+            }
+        }
+    }
+
+    /** 识别侧自愈：丢弃裁剪网格与稳定窗口，整屏重找；不复位有效识图正在执行的任务。 */
     private fun recoverVisionPipeline() {
         trace("PIPELINE_VISION_RESET", "grid=${sessionGrid != null} misses=$yoloMissStreak")
         sessionGrid = null
@@ -652,8 +960,7 @@ class ScreenAssistService : Service() {
         recognitionEpoch++
         abortCaptureWindow()
         lastMappedAt = 0L
-        lastVisionAt = 0L
-        lastStableWindowAt = 0L
+        beginVisionEpoch()
         syncCaptureDemand()
         kickCapture(forceProcess = true)
         // 这条恢复会周期性发生（比如棋盘被挡住），状态行不能每 6 秒刷一次同样的字。
@@ -666,92 +973,93 @@ class ScreenAssistService : Service() {
     }
 
     /**
-     * 录制侧自愈：保留 MediaProjection，只换掉 ImageReader 与 VirtualDisplay。
-     *
-     * ImageReader 缓冲池只要有一轮不消费就会被填满，Surface 随即停止投递，回调彻底停掉；
-     * 这时任何“再踢一次取帧”都无效，必须重建读取器。用户的现场办法是手动暂停再开始，
-     * 这里把它自动化，且不打断用户操作。
+     * 取帧侧自愈：保留本次授权与唯一VirtualDisplay，只替换ImageReader并重接Surface。
+     * Android 14+ 同一 MediaProjection 只能创建一次 VirtualDisplay，因此这里绝不重新创建。
      */
     private fun rebuildCapturePipeline() {
-        if (stopping || overlayClosed) return
+        if (stopping || overlayClosed || paused) return
         val projection = mediaProjection ?: return
-        val w = config.frameSize.first
-        val h = config.frameSize.second
-        if (w <= 0 || h <= 0) return
-        trace("CAPTURE_REBUILD", "size=${w}x$h")
+        val display = virtualDisplay ?: run {
+            captureResumePending = true
+            setStatus("屏幕共享输出已失效；请点击继续重新授权")
+            postRender()
+            return
+        }
+        val width = capturePipelineWidth.coerceAtLeast(1)
+        val height = capturePipelineHeight.coerceAtLeast(1)
+        trace("CAPTURE_REBUILD", "size=${width}x${height} reuseVirtualDisplay=true")
         recognitionEpoch++
         abortCaptureWindow()
-        val oldReader = imageReader
-        val oldDisplay = virtualDisplay
-        runCatching { oldReader?.setOnImageAvailableListener(null, null) }
-        runCatching { oldDisplay?.release() }
-        runCatching { oldReader?.close() }
+        runCatching { imageReader?.setOnImageAvailableListener(null, null) }
+        val detached = runCatching {
+            display.setSurface(null)
+            true
+        }.getOrDefault(false)
+        if (!detached) {
+            trace("CAPTURE_REBUILD_FAILED", "stage=detach_surface")
+            releaseCapture()
+            captureResumePending = true
+            setStatus("屏幕输出管线无法安全重建；请点击继续重新授权")
+            postRender()
+            return
+        }
+        runCatching { imageReader?.close() }
         imageReader = null
-        virtualDisplay = null
-        val dpi = resources.displayMetrics.densityDpi
+        capturePipelineActive = false
         val reader = runCatching {
-            ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 2).also {
+            ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2).also {
                 it.setOnImageAvailableListener(::onImageAvailable, captureHandler)
             }
         }.getOrNull()
         if (reader == null) {
             trace("CAPTURE_REBUILD_FAILED", "stage=reader")
-            return
-        }
-        imageReader = reader
-        val display = runCatching {
-            projection.createVirtualDisplay(
-                "assist-capture", w, h, dpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                reader.surface, null, workerHandler
-            )
-        }.getOrNull()
-        if (display == null) {
-            trace("CAPTURE_REBUILD_FAILED", "stage=virtual_display")
-            runCatching { reader.setOnImageAvailableListener(null, null) }
-            runCatching { reader.close() }
-            imageReader = null
-            // 连虚拟显示都建不起来，说明这个 MediaProjection 已经失效（用户从通知栏停了录屏
-            // 或系统回收）：不再反复重建，如实告诉用户重新开始屏幕识别。
-            if (!projectionStillUsable()) mediaProjection = null
-            setStatus("屏幕录制已中断且无法自动恢复\n请在悬浮窗辅助页重新点击『一键准备』")
+            display.setSurface(null)
+            captureResumePending = true
+            setStatus("无法重建屏幕帧读取器；请点击继续重新授权")
             postRender()
             return
         }
+        val attached = runCatching {
+            display.setSurface(reader.surface)
+            true
+        }.getOrDefault(false)
+        if (!attached) {
+            runCatching { reader.setOnImageAvailableListener(null, null) }
+            runCatching { reader.close() }
+            releaseCapture()
+            captureResumePending = true
+            trace("CAPTURE_REBUILD_FAILED", "stage=attach_surface")
+            setStatus("屏幕输出管线无法恢复；请点击继续重新授权")
+            postRender()
+            return
+        }
+        if (projection !== mediaProjection) {
+            runCatching { display.setSurface(null) }
+            runCatching { reader.close() }
+            captureResumePending = true
+            return
+        }
+        imageReader = reader
         virtualDisplay = display
-        // 重建后清掉所有旧的证据时间戳；下一帧到来后再重新建立 streamStartedAt。
+        retainedPausedVirtualDisplay = null
+        capturePipelineActive = true
         captureStartedAt = System.currentTimeMillis()
         lastStreamFrameAt = 0L
         streamStartedAt = 0L
-        lastStableWindowAt = 0L
-        lastVisionAt = 0L
         lastStreamSampleAt = Long.MIN_VALUE
+        beginVisionEpoch(captureStartedAt)
         lastFullVisionCheckAt = 0L
         syncCaptureDemand()
         kickCapture(forceProcess = true)
-        // 重建后必须继续被监督，否则下一次停摆就没人管了。
         armPipelineWatchdog()
-        setStatus("识别画面已中断，已自动重建取帧管线…")
+        setStatus("识别画面已中断，已重新接回屏幕输出")
         postRender()
     }
 
-    /** 重建失败时判断这个 MediaProjection 还能不能继续用（避免无意义地反复重建）。 */
-    private fun projectionStillUsable(): Boolean {
-        val projection = mediaProjection ?: return false
-        val probe = runCatching {
-            ImageReader.newInstance(16, 16, PixelFormat.RGBA_8888, 1)
-        }.getOrNull() ?: return false
-        val created = runCatching {
-            projection.createVirtualDisplay(
-                "assist-probe", 16, 16, resources.displayMetrics.densityDpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                probe.surface, null, null
-            )
-        }.getOrNull()
-        runCatching { created?.release() }
-        runCatching { probe.close() }
-        return created != null
-    }
+    /** 不探测性创建第二个VirtualDisplay；授权生命周期由MediaProjection.Callback负责失效通知。 */
+    private fun projectionStillUsable(): Boolean =
+        mediaProjection != null && virtualDisplay != null && mediaProjectionCallback != null
+
     /** 前台应用全屏基准；只由无障碍窗口事件更新。 */
     @Volatile private var foregroundBaselinePackage: String? = null
     @Volatile private var foregroundPauseSnapshot: ForegroundPausePolicy.Snapshot? = null
@@ -799,6 +1107,13 @@ class ScreenAssistService : Service() {
 
     /** 最近一次独立全屏复核的时刻；周期复核不依赖上一局面类别。 */
     @Volatile private var lastFullVisionCheckAt = 0L
+    /** 当前框选层；只在用户调整识别范围时短暂存在，不参与识别。 */
+    private var boardRegionOverlay: com.xiangqi.assist.assist.ui.BoardRegionOverlayView? = null
+    private var boardRegionOverlayParams: WindowManager.LayoutParams? = null
+    /** 框选期间不消费像素做识别，避免把框选层自己识别成棋盘。 */
+    @Volatile private var boardRegionEditing = false
+    /** 预选时记录下来的棋面与落点；正式落子直接复用，不再重复识图。 */
+    private val previewSnapshot = PreviewBoardSnapshot()
     /** TFLite模型选择/关闭时的识别代号，关闭后所有在途帧只允许收尾不再推理。 */
     @Volatile private var lastRejectReason: String? = null
 
@@ -819,6 +1134,8 @@ class ScreenAssistService : Service() {
         val reuseSelectedOrigin: Boolean,
         val requireAutoSwitch: Boolean,
         val createdAt: Long,
+        val pinnedBySnapshot: Boolean = false,
+        val preselectionAccessibilityInstance: AssistAccessibilityService? = null,
     )
     @Volatile private var pendingAutoMove: PendingAutoMove? = null
     /** 本次 FEN+着法已经完成通道保险；下一手或失败重试会清除。 */
@@ -845,11 +1162,15 @@ class ScreenAssistService : Service() {
     @Volatile private var previewGestureInFlight = false
     @Volatile private var previewGestureStartedAt = 0L
     @Volatile private var previewGestureToken = 0L
+    /** 已完成起点预选所用的无障碍实例；实例变化意味着棋盘上的选中状态不再可信。 */
+    @Volatile private var previewAccessibilityInstance: AssistAccessibilityService? = null
     private var previewFinalizationScheduled = false
     /** 蓝色候选箭头预选状态（纯 JVM 状态类；渲染函数只读）。 */
     private val previewState = CandidatePreviewState()
-    /** 预选手势派发的最小间隔（同一 UCP 起点已由策略去重）。 */
-    private var lastPreviewDispatchAt = 0L
+    /** 预选目标切换的前一次选中点击时刻；首次点击不受间隔约束。 */
+    private var lastPreviewDispatchAt = Long.MIN_VALUE
+    /** 上一次选中点击后为下一次切换抽取的随机最短间隔。 */
+    private var requiredPreviewSwitchGapMs = CANDIDATE_PREVIEW_MIN_GAP_MS
     /** 仿真·预案试选：上次试选时间与轮换下标 */
 
     private var windowManager: WindowManager? = null
@@ -919,23 +1240,45 @@ class ScreenAssistService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_START) {
+            if (preparedSession && mediaProjection != null && retainedPausedVirtualDisplay != null) {
+                // 权限关闭过渡期旧服务仍存活；重新准备时复用已授权会话，不误吞新调用。
+                if (!paused) return START_STICKY
+                mainHandler.post { toggleRun() }
+                return START_STICKY
+            }
             val resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0)
             @Suppress("DEPRECATION")
             val data = if (Build.VERSION.SDK_INT >= 33)
                 intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
             else intent.getParcelableExtra(EXTRA_RESULT_DATA)
-            startForegroundInternal()
-            startCapture(resultCode, data)
+            val resume = intent.getBooleanExtra(EXTRA_RESUME_CAPTURE, false)
+            startForegroundInternal(resume)
+            startCapture(resultCode, data, resume)
         }
         return START_STICKY
     }
 
-    private fun startForegroundInternal() {
+    private fun startForegroundInternal(@Suppress("UNUSED_PARAMETER") resumeCapture: Boolean = false) {
         createChannel()
         val notification = buildNotification()
-        val type = if (Build.VERSION.SDK_INT >= 29)
+        val projectionType = if (Build.VERSION.SDK_INT >= 29)
             android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
-        ServiceCompat.startForeground(this, NOTIF_ID, notification, type)
+        ServiceCompat.startForeground(this, NOTIF_ID, notification, projectionType)
+    }
+
+    /** 只有有效投影仍存在时维持 mediaProjection 前台服务类型；暂停时内容说明帧输出已断开。 */
+    private fun refreshForegroundServiceTypeForCaptureState() {
+        if (Build.VERSION.SDK_INT < 29) return
+        val projectionType = if (mediaProjection != null && virtualDisplay != null)
+            android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION else 0
+        runCatching {
+            ServiceCompat.startForeground(
+                this,
+                NOTIF_ID,
+                buildNotification(lastStatusText),
+                projectionType,
+            )
+        }.onFailure { Log.w(TAG, "failed to update projection foreground service state", it) }
     }
 
     private fun createChannel() {
@@ -945,6 +1288,20 @@ class ScreenAssistService : Service() {
         nm.createNotificationChannel(ch)
     }
 
+    private fun overlayPresentationMode(): OverlayPresentationPolicy.Mode = when {
+        landingUiSuppressed -> OverlayPresentationPolicy.Mode.TEMPORARY_BALL_FOR_MOVE
+        config.overlayCollapsed -> OverlayPresentationPolicy.Mode.BALL
+        else -> OverlayPresentationPolicy.Mode.PANEL
+    }
+
+    private fun refreshForegroundNotification() {
+        if (overlayClosed || stopping) return
+        runCatching {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.notify(NOTIF_ID, buildNotification(lastStatusText))
+        }
+    }
+
     private fun buildNotification(contentText: String? = null): Notification {
         val pi = PendingIntent.getActivity(
             this, 0,
@@ -952,17 +1309,20 @@ class ScreenAssistService : Service() {
             PendingIntent.FLAG_IMMUTABLE
         )
         val title = when {
+            paused && preparedSession -> "象棋辅助·悬浮窗辅助（已暂停）"
             paused -> "象棋辅助·悬浮窗辅助（已停止）"
             autoPlayOn -> "象棋辅助·悬浮窗辅助（自动走子已开启）"
             else -> "象棋辅助·悬浮窗辅助运行中"
         }
+        val baseContent = contentText ?: when {
+            paused && preparedSession -> "屏幕画面未输出，授权保留，无障碍继续监听前台应用"
+            paused -> "环境已准备，等待用户在悬浮窗内点击开始"
+            autoPlayOn -> "正在识别局面并按条件自动落子"
+            else -> "正在识别局面并给出走法建议"
+        }
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle(title)
-            .setContentText(contentText ?: when {
-                paused -> "环境已准备，等待用户点击开始"
-                autoPlayOn -> "正在识别局面并按条件自动落子"
-                else -> "正在识别局面并给出走法建议"
-            })
+            .setContentText(OverlayPresentationPolicy.notificationContent(overlayPresentationMode(), baseContent))
             .setSmallIcon(R.drawable.ic_launcher)
             .setOngoing(true)
             .setContentIntent(pi)
@@ -971,8 +1331,9 @@ class ScreenAssistService : Service() {
 
     // ==================== 截屏 ====================
 
-    private fun startCapture(resultCode: Int, data: Intent?) {
+    private fun startCapture(resultCode: Int, data: Intent?, resumeCapture: Boolean = false) {
         if (mediaProjection != null || data == null) return
+        val resumingPreparedSession = resumeCapture && preparedSession
         if (!runSessionStarted) {
             runtimeLogger.startSession("capture_start")
         }
@@ -989,11 +1350,25 @@ class ScreenAssistService : Service() {
         sessionGrid = null
         stopping = false
         overlayClosed = false
+        preparedSession = true
+        preparedIntent = true
+        captureResumePending = false
+        val resumeIntent = captureResumeIntent
+        captureResumeIntent = CaptureResumeIntent.NONE
         paused = AssistRunControlPolicy.PREPARED_PAUSED
-        runSessionStarted = false
-        foregroundPauseSnapshot = null
+        if (!resumingPreparedSession) {
+            runSessionStarted = false
+        }
+        if (!resumingPreparedSession) {
+            foregroundBaselinePackage = null
+            foregroundPauseSnapshot = null
+            pendingCaptureGrant = null
+            resumeCaptureWhenTargetReturns = false
+            resumeAuthorizationDenied = false
+        }
         mainHandler.removeCallbacks(accessibilityWatchdog)
         recognitionEpoch++
+        beginVisionEpoch()
         clearLandingTransaction(restoreWindow = true)
         searching = false
         searchSettled = false
@@ -1005,6 +1380,7 @@ class ScreenAssistService : Service() {
         synchronized(frameQueueLock) {
             pendingFrame = null
             frameConsumeScheduled = false
+            frameConsumeScheduledAt = 0L
         }
         userRefreshActive = false
         refresh.cancel()
@@ -1023,21 +1399,68 @@ class ScreenAssistService : Service() {
         val dpi = metrics.densityDpi
 
         mediaProjection = projectionManager.getMediaProjection(resultCode, data)
+        val projection = mediaProjection ?: run {
+            setStatus("未能建立屏幕录制授权会话")
+            return
+        }
+        val callback = object : MediaProjection.Callback() {
+            override fun onStop() {
+                mainHandler.post { onMediaProjectionStopped() }
+            }
+        }
+        mediaProjectionCallback = callback
+        projection.registerCallback(callback, mainHandler)
+        capturePipelineWidth = captureW
+        capturePipelineHeight = captureH
+        capturePipelineDensityDpi = dpi
         // 录屏输出用较低分辨率降低像素拷贝/内存压力；模型输入仍由TFLite统一letterbox到640。
         // config.frameSize记录的是录屏帧尺寸，不是物理触摸尺寸，落子派发时会反向缩放。
         config.frameSize = captureW to captureH
         val reader = ImageReader.newInstance(captureW, captureH, PixelFormat.RGBA_8888, 2)
-        // 挂到取帧专用线程：与识别线程解耦，识别再慢也不会堵住缓冲消费
+        // 挂到取帧专用线程：与识别线程解耦，识别再慢也不会堵住缓冲消费。
         reader.setOnImageAvailableListener(::onImageAvailable, captureHandler)
         imageReader = reader
-        virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "assist-capture", captureW, captureH, dpi,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            reader.surface, null, workerHandler
-        )
+        val display = runCatching {
+            projection.createVirtualDisplay(
+                "assist-capture", captureW, captureH, dpi,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                reader.surface, null, workerHandler
+            )
+        }.getOrNull()
+        if (display == null) {
+            runCatching { reader.setOnImageAvailableListener(null, null) }
+            runCatching { reader.close() }
+            imageReader = null
+            runCatching { projection.unregisterCallback(callback) }
+            runCatching { projection.stop() }
+            mediaProjectionCallback = null
+            mediaProjection = null
+            capturePipelineActive = false
+            captureResumePending = true
+            refreshForegroundServiceTypeForCaptureState()
+            setStatus("未能创建屏幕捕获显示；请重新一键准备")
+            return
+        }
+        virtualDisplay = display
+        retainedPausedVirtualDisplay = null
+        capturePipelineActive = true
         imageReader = reader
-        captureStartedAt = if (virtualDisplay != null) System.currentTimeMillis() else 0L
+        captureStartedAt = System.currentTimeMillis()
+        beginVisionEpoch(captureStartedAt)
         Log.i(TAG, "capture prepared: screen=${screenW}x${screenH} stream=${captureW}x${captureH}; paused=true")
+        // 只有虚拟显示确实断开并保留后，才将本次一键准备认定为成功的已暂停会话。
+        if (!pauseCapturePipeline()) {
+            releaseCapture()
+            preparedSession = false
+            preparedIntent = false
+            captureResumePending = true
+            refreshForegroundServiceTypeForCaptureState()
+            setStatus("无法安全暂停屏幕输出；请重试一键准备")
+            cancelForegroundNotification()
+            postRender()
+            return
+        }
+        refreshForegroundServiceTypeForCaptureState()
 
         // 模式恢复：workMode 是唯一真源，三态互斥由 setModeInternal 保证。
         // 自动落子是独立开关（默认开）；通道没连接时由 autoBlockReason 明确说明原因，
@@ -1048,7 +1471,9 @@ class ScreenAssistService : Service() {
         autoLastResult = null
         setModeInternal(config.workMode)
         pendingBoard = null
-        setStatus("准备完成，当前已停止\n点击『开始』后才会识别和计算")
+        if (!resumingPreparedSession || resumeIntent == CaptureResumeIntent.NONE) {
+            setStatus("准备完成，当前已暂停\n点击悬浮窗内『开始』后才会识别和计算")
+        }
 
         // 引擎**不在这里启动**。
         // 启动要加载 NNUE 权重并申请 Hash 内存（几百 MB 起），一开机就吃内存会把
@@ -1064,10 +1489,53 @@ class ScreenAssistService : Service() {
                     )
                 )
                 it.setThinkTime(config.thinkTimeMs)
-                // 多条候选共享同一个 go 的总时间/深度预算；“变招”只浏览缓存。
+                // 多条候选共享同一个 go 的总时间/深度预算；“变招”只改变下一手选择，不启动新搜索。
                 it.setMultiPv(config.candidateCount)
             }
+        if (resumingPreparedSession && resumeIntent != CaptureResumeIntent.NONE) {
+            resumeCaptureWhenTargetReturns = foregroundPauseSnapshot?.wasRunning == true
+            if (resumeCaptureWhenTargetReturns) {
+                // 授权结果暂存到前台目标核验通过之后，避免把授权/控制页画面当成棋盘。
+                setStatus("录屏权限已恢复，等待回到原棋盘应用后继续识别…")
+            } else {
+                if (!resumeRuntime(rebaseBoard = true, userInitiated = false)) {
+                    captureResumePending = true
+                    setStatus("屏幕授权已返回，但输出Surface未接回；请再次点击继续")
+                } else {
+                    setStatus("屏幕授权已恢复\n正在从新的屏幕帧重新确认棋面…")
+                }
+            }
+        }
         postRender()
+    }
+
+    private fun onMediaProjectionStopped() {
+        if (mediaProjection == null) return
+        trace("PROJECTION_STOPPED", "prepared=$preparedSession paused=$paused")
+        disarmPipelineWatchdog()
+        abortCaptureWindow()
+        synchronized(frameQueueLock) {
+            pendingFrame = null
+            frameConsumeScheduled = false
+            frameConsumeScheduledAt = 0L
+        }
+        runCatching { imageReader?.setOnImageAvailableListener(null, null) }
+        runCatching { virtualDisplay?.release() }
+        runCatching { imageReader?.close() }
+        // 系统已结束授权；不要再次调用 projection.stop()。
+        mediaProjection = null
+        mediaProjectionCallback = null
+        virtualDisplay = null
+        retainedPausedVirtualDisplay = null
+        imageReader = null
+        capturePipelineActive = false
+        paused = true
+        if (preparedSession && !stopping && !overlayClosed) {
+            refreshForegroundServiceTypeForCaptureState()
+            captureResumePending = true
+            setStatus("系统已结束屏幕共享；仍保持暂停，请点击『继续』重新授权")
+            postRender()
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -1117,7 +1585,7 @@ class ScreenAssistService : Service() {
         if (want != captureDemand) {
             captureDemand = want
             if (want != CaptureDemand.OFF && !paused && !manualMode) {
-                // 清空稳定窗口后让录屏流立即提供一个样本；后续样本仍按250ms节拍进入。
+                // 清空稳定窗口后让录屏流立即提供一个样本；后续样本按125ms节拍进入。
                 kickCapture()
             }
         }
@@ -1133,40 +1601,47 @@ class ScreenAssistService : Service() {
     private val capturePump = object : Runnable {
         override fun run() {
             val p = refreshPhase()
-            if (!paused && !manualMode &&
-                (isContinuousScanMode() || refresh.isActive || AssistPhase.needsBoard(p))) {
-                val now = System.currentTimeMillis()
-                if (lastStreamSampleAt == Long.MIN_VALUE ||
-                    now - lastStreamSampleAt >= STREAM_SAMPLE_PERIOD_MS * 2) {
-                    kickCapture()
-                }
-                mainHandler.postDelayed(this, 500L)
-            }
+        if (!paused && !manualMode &&
+            (isContinuousScanMode() || refresh.isActive || AssistPhase.needsBoard(p))) {
+            val now = System.currentTimeMillis()
+            val timeout = if (p == AssistPhase.Phase.WAITING)
+                HeartbeatPolicy.WAITING_SCAN_TIMEOUT_MS else HeartbeatPolicy.OTHER_SCAN_TIMEOUT_MS
+            val lastProcessed = lastProcessedSampleAt
+            if (lastProcessed <= 0L || now - lastProcessed >= timeout) kickCapture()
+            mainHandler.postDelayed(this, maxOf(1L, timeout / 2))
+        }
         }
     }
 
-    /** 录屏流保活：系统回调失活时主动取一张，但不绕过稳定窗口。 */
+    /** Single-flight capture probe. It may pull one ImageReader buffer, but never skips the stable window. */
     private fun kickCapture(forceProcess: Boolean = false) {
-        captureHandler.post {
-            if (stopping || overlayClosed || paused || manualMode ||
-                (captureDemand == CaptureDemand.OFF && !refresh.isActive)) return@post
-            if (forceProcess) lastStreamSampleAt = Long.MIN_VALUE
-            val reader = imageReader ?: return@post
-            val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return@post
+        if (!captureKickInFlight.compareAndSet(false, true)) return
+        val requestAt = System.currentTimeMillis()
+        lastCaptureKickAt = requestAt
+        val accepted = captureHandler.post {
             try {
-                val now = System.currentTimeMillis()
-                lastStreamFrameAt = now
-                if (streamStartedAt <= 0L) streamStartedAt = now
-                if (FrameStabilityPolicy.shouldSample(now, lastStreamSampleAt)) {
-                    lastStreamSampleAt = now
-                    consumeStreamSample(imageToFrame(image, now), recognitionEpoch, now)
+                if (stopping || overlayClosed || paused || manualMode ||
+                    (captureDemand == CaptureDemand.OFF && !refresh.isActive && !forceProcess)) return@post
+                val reader = imageReader ?: return@post
+                val image = runCatching { reader.acquireLatestImage() }.getOrNull() ?: return@post
+                try {
+                    val now = System.currentTimeMillis()
+                    lastStreamFrameAt = now
+                    if (streamStartedAt <= 0L) streamStartedAt = now
+                    if (FrameStabilityPolicy.shouldSample(now, lastStreamSampleAt)) {
+                        lastStreamSampleAt = now
+                        consumeStreamSample(imageToFrame(image, now), recognitionEpoch, now)
+                    }
+                } catch (t: Throwable) {
+                    Log.w(TAG, "stream fallback sample failed", t)
+                } finally {
+                    runCatching { image.close() }
                 }
-            } catch (t: Throwable) {
-                Log.w(TAG, "stream fallback sample failed", t)
             } finally {
-                runCatching { image.close() }
+                captureKickInFlight.set(false)
             }
         }
+        if (!accepted) captureKickInFlight.set(false)
     }
 
     /** 清空稳定窗口但保留当前阶段标记。 */
@@ -1176,7 +1651,9 @@ class ScreenAssistService : Service() {
         streamStartedAt = 0L
         stableFrameCount = 0
         stableFrameAt = 0L
+        lastStableWindowAt = 0L
         streamAnomalyStreak = 0
+        if (capturePipelineActive && !paused && !manualMode) beginVisionEpoch()
     }
 
     /** 状态切换、暂停、关闭时清空稳定窗口；不修改用户已确认的棋面。 */
@@ -1205,19 +1682,24 @@ class ScreenAssistService : Service() {
                 foregroundBaselinePackage = decision.current
                 val snapshot = foregroundPauseSnapshot
                 if (snapshot != null && decision.current == snapshot.resumePackage) {
-                    foregroundPauseSnapshot = null
                     trace(
                         "FOREGROUND_RETURN",
-                        "package=${decision.current} wasRunning=${snapshot.wasRunning}"
+                        "package=${decision.current} wasRunning=${snapshot.wasRunning} suspendedByForeground=${snapshot.suspendedByForeground}"
                     )
-                    if (ForegroundPausePolicy.shouldResume(snapshot, decision.current)) {
+                    if (snapshot.wasRunning && snapshot.suspendedByForeground) {
                         resumeAfterForegroundReturn(decision.current)
                     } else {
-                        // 切出前本来就是暂停：回来后保持原状，绝不擅自开始。
-                        setStatus("已回到原前台应用，恢复切出前状态：暂停")
-                        postRender()
+                        // 用户手动暂停后回到目标应用仍保持暂停；授权恢复则只在目标前台启动录屏。
+                        maybeStartCaptureAfterForegroundReturn()
+                        if (foregroundPauseSnapshot != null) {
+                            setStatus("已回到原棋盘应用，仍保持暂停；点击悬浮窗『继续』后恢复")
+                            postRender()
+                        }
                     }
                 } else if (snapshot == null) {
+                    // 授权中转页会把基准暂设为本应用；即使策略判定为普通切换，
+                    // 也先尝试消费已获授权的单次令牌，匹配其原象棋目标后才启动录屏。
+                    maybeStartCaptureAfterForegroundReturn()
                     val captured = ForegroundPausePolicy.capture(paused, from)
                     if (captured != null) {
                         foregroundPauseSnapshot = captured
@@ -1241,28 +1723,71 @@ class ScreenAssistService : Service() {
      * 返回原应用时仅当快照记录为运行中才自动恢复，并从当前画面重建棋面基线。
      */
     private fun pauseForForegroundSwitch(currentPackage: String) {
-        pauseRuntime(clearAnalysis = true)
-        setStatus("检测到前台应用已切换（$currentPackage）\n已临时暂停，避免误触；回到原应用将恢复切出前状态")
+        pauseRuntime(clearAnalysis = true, preserveForegroundIntent = true)
+        setStatus("检测到前台应用已切换（$currentPackage）\n已暂停屏幕输出但保留授权；回到原应用后自动恢复")
         postRender()
     }
 
-    /** 回到切出前的应用：恢复运行意图，但旧画面、旧建议和旧手势一律不复用。 */
+    /** 回到切出前的应用：运行态自动恢复；手动暂停则仍保持暂停。 */
     private fun resumeAfterForegroundReturn(returnedPackage: String) {
-        if (stopping || overlayClosed || mediaProjection == null) {
-            paused = true
-            setStatus("已回到原前台应用，但屏幕录制已中断\n请在悬浮窗辅助页重新准备环境")
+        val snapshot = foregroundPauseSnapshot ?: return
+        if (stopping || overlayClosed || !preparedSession) return
+        if (!ForegroundPausePolicy.isResumeTarget(snapshot, returnedPackage)) return
+        if (foregroundBaselinePackage != returnedPackage) return
+        trace("FOREGROUND_RESUME", "package=$returnedPackage mode=$activeWorkMode")
+        if (pendingCaptureGrant != null) {
+            maybeStartCaptureAfterForegroundReturn()
+            return
+        }
+        if (captureResumePending || !isProjectionAuthorized()) {
+            requestCaptureAuthorization(CaptureResumeIntent.FOREGROUND_RETURN)
+            return
+        }
+
+        // 手动暂停只确认回到了原应用，不自动开始识别。
+        if (!snapshot.wasRunning || !snapshot.suspendedByForeground) {
+            foregroundPauseSnapshot = null
+            resumeCaptureWhenTargetReturns = false
+            setStatus("已回到原棋盘应用，仍保持暂停；点击悬浮窗『继续』后恢复")
             postRender()
             return
         }
-        trace("FOREGROUND_RESUME", "package=$returnedPackage mode=$activeWorkMode")
-        resumeRuntime(rebaseBoard = true, userInitiated = false)
-        setStatus("已回到原前台应用\n已恢复切出前的运行状态，正在重新确认当前棋面…")
+
+        // 保留快照直到 Surface 重接成功；失败时授权回退仍要等这个目标包名。
+        if (!resumeRuntime(rebaseBoard = true, userInitiated = false)) {
+            requestCaptureAuthorization(CaptureResumeIntent.FOREGROUND_RETURN)
+            return
+        }
+        foregroundPauseSnapshot = null
+        resumeCaptureWhenTargetReturns = false
+        setStatus("已回到原棋盘应用，正在从新帧重新建立棋面基线…")
         postRender()
     }
 
-    /** 暂停运行管线。日志会话与用户配置保持不变。 */
-    private fun pauseRuntime(clearAnalysis: Boolean) {
+    /**
+     * 暂停运行管线并释放帧读取器；保持 MediaProjection 与 VirtualDisplay 会话，
+     * 通过 VirtualDisplay.setSurface(null) 停止图像输出。无障碍前台观察继续运行。
+     */
+    private fun pauseRuntime(
+        clearAnalysis: Boolean,
+        preserveForegroundIntent: Boolean = false,
+    ) {
         paused = true
+        captureResumePending = false
+        if (preserveForegroundIntent) {
+            resumeCaptureWhenTargetReturns = true
+            resumeAuthorizationDenied = false
+        } else if (foregroundPauseSnapshot?.suspendedByForeground != true) {
+            resumeCaptureWhenTargetReturns = false
+            foregroundPauseSnapshot = null
+        } else {
+            resumeCaptureWhenTargetReturns = false
+        }
+        captureResumeIntent = if (preserveForegroundIntent) {
+            CaptureResumeIntent.FOREGROUND_RETURN
+        } else {
+            CaptureResumeIntent.NONE
+        }
         mainHandler.removeCallbacks(accessibilityWatchdog)
         recognitionEpoch++
         abortCaptureWindow()
@@ -1276,6 +1801,17 @@ class ScreenAssistService : Service() {
             analysisCycleGate.invalidate()
             resetSuggestionState()
         }
+        // 暂停留住当前授权与VirtualDisplay，只断开Surface并关闭ImageReader；若ROM拒绝，
+        // 安全回退为结束授权并在继续时重新申请，不在暂停态留下仍运行的取帧链。
+        if (!pauseCapturePipeline()) {
+            captureResumePending = true
+            captureResumeIntent = if (preserveForegroundIntent) {
+                CaptureResumeIntent.FOREGROUND_RETURN
+            } else {
+                CaptureResumeIntent.USER_CONTINUE
+            }
+        }
+        refreshForegroundServiceTypeForCaptureState()
         requestRenderOnly()
     }
 
@@ -1283,11 +1819,12 @@ class ScreenAssistService : Service() {
      * 启动或继续运行。继续不创建日志起点；首次运行与“重置”由各自入口显式创建。
      * [rebaseBoard] 为 true 时丢弃暂停前的视觉基线，以免外部应用期间已走多手。
      */
-    private fun resumeRuntime(rebaseBoard: Boolean, userInitiated: Boolean) {
-        if (mediaProjection == null || imageReader == null || virtualDisplay == null) {
+    private fun resumeRuntime(rebaseBoard: Boolean, userInitiated: Boolean): Boolean {
+        if (!isCapturing() && !resumeCapturePipeline()) {
             paused = true
-            setStatus("运行环境尚未准备：缺少屏幕录制\n请打开悬浮窗辅助页并点击『一键准备』")
-            return
+            captureResumePending = true
+            setStatus("无法接回屏幕画面；请重新确认屏幕录制权限")
+            return false
         }
         paused = false
         if (autoPlayOn) {
@@ -1299,6 +1836,7 @@ class ScreenAssistService : Service() {
         }
         recognitionEpoch++
         abortCaptureWindow()
+        beginVisionEpoch()
         if (rebaseBoard) {
             resumeRebasePending = true
             tracker.reset(currentRedGo)
@@ -1319,18 +1857,23 @@ class ScreenAssistService : Service() {
         lastStreamFrameAt = 0L
         streamStartedAt = 0L
         captureStartedAt = System.currentTimeMillis()
-        lastStableWindowAt = 0L
-        lastVisionAt = 0L
+        beginVisionEpoch(captureStartedAt)
         inferenceStartedAt = 0L
         lastPipelineRecoveryAt = 0L
+        // 新一轮运行：上一轮预选记下的棋面与落点不再代表眼前这盘棋。
+        previewSnapshot.clear()
         armPipelineWatchdog()
         syncCaptureDemand(AssistPhase.Phase.FINDING)
         kickCapture(forceProcess = true)
         if (userInitiated) {
             foregroundBaselinePackage = null
             foregroundPauseSnapshot = null
+            pendingCaptureGrant = null
+            resumeCaptureWhenTargetReturns = false
+            resumeAuthorizationDenied = false
             AssistAccessibilityService.instance?.reportCurrentForegroundWindow()
         }
+        return true
     }
 
 
@@ -1364,6 +1907,82 @@ class ScreenAssistService : Service() {
             if (params != null) return b to params
         }
         return null
+    }
+
+    // ==================== 框选棋盘识别范围 ====================
+
+    /**
+     * 点「框选棋盘范围」：铺一层压暗的框选层，让用户拖动四角确定识别区域。
+     *
+     * 默认范围分三种情况：
+     * - 已经框选过 → 恢复上次保存的范围；
+     * - 当前识别到了棋盘 → 以棋盘外框四边各外扩 5% 作为默认；
+     * - 识别不到棋盘（不在象棋界面内也能打开）→ 屏幕居中、正方形、宽度铺满屏幕。
+     */
+    private fun beginBoardRegionEditing() {
+        if (stopping || overlayClosed || boardRegionEditing) return
+        if (!android.provider.Settings.canDrawOverlays(this)) {
+            setStatus("需要先授予悬浮窗权限，才能框选识别范围")
+            return
+        }
+        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+        val dm = screenMetrics()
+        val sw = dm.widthPixels
+        val sh = dm.heightPixels
+        val configured = BoardRegionGeometry.fromArray(config.boardRegion)
+        val grid = sessionGrid
+        val initial = configured
+            ?: grid?.let { BoardRegionGeometry.expandBoard(it) }
+            ?: BoardRegionGeometry.centeredSquare(sw, sh)
+
+        val view = com.xiangqi.assist.assist.ui.BoardRegionOverlayView(this)
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+            PixelFormat.TRANSLUCENT,
+        ).apply { gravity = Gravity.TOP or Gravity.START }
+        view.setInitialRegion(initial)
+        view.onComplete = { region -> commitBoardRegion(region) }
+        view.onCancel = { dismissBoardRegionOverlay() }
+        runCatching { wm.addView(view, params) }.onFailure {
+            setStatus("框选层打开失败：${it.javaClass.simpleName}")
+            return
+        }
+        boardRegionOverlay = view
+        boardRegionOverlayParams = params
+        boardRegionEditing = true
+        // 框选期间不再取帧，避免把压暗层自己当成棋盘。
+        syncCaptureDemand()
+        setStatus("拖动四角调整识别范围，完成后只在该区域内监听画面变化")
+    }
+
+    /** 保存用户确认的范围；下一次打开框选会直接恢复该位置与大小。 */
+    private fun commitBoardRegion(region: BoardRegion) {
+        config.boardRegion = region.clamp().toArray()
+        dismissBoardRegionOverlay()
+        // 范围变了，之前建立的定位网格与稳定窗口都不再对应当前区域。
+        sessionGrid = null
+        resetStreamWindow()
+        lastFullVisionCheckAt = 0L
+        setStatus("已保存识别范围，只在框选区域内监听画面变化\n再次点击「框选棋盘范围」可继续调整")
+        kickCapture()
+        postRender()
+    }
+
+    private fun dismissBoardRegionOverlay() {
+        val view = boardRegionOverlay
+        boardRegionOverlay = null
+        boardRegionOverlayParams = null
+        boardRegionEditing = false
+        if (view != null) {
+            runCatching { windowManager?.removeView(view) }
+        }
+        syncCaptureDemand()
+        postRender()
     }
 
     /** 把帧内某矩形涂成中性灰（模型在该区域不会产出检测框） */
@@ -1648,13 +2267,13 @@ class ScreenAssistService : Service() {
         val observation = recognizeFrame(frame, epoch)
         if (observation == null) {
             // 模型没有给出可用盘面：保留滑动窗口，只把释放闸门重新打开；
-            // 下一个 250ms 样本即可再次推理，不必重新等待八帧。
+            // 下一个125ms样本即可再次推理，不必重新等待八个样本。
             stableFrameWindow.rearm()
             trace("VISION_REJECT", "reason=unavailable epoch=$epoch phase=${refreshPhase()} misses=${yoloMissStreak + 1}")
             streamAnomalyStreak++
             yoloMissStreak++
             lastFailReason = "稳定关键帧未得到可用棋面"
-            if (streamAnomalyStreak >= STREAM_STABLE_FRAME_COUNT) {
+            if (streamAnomalyStreak >= STREAM_ANOMALY_GRID_RESET_MISSES) {
                 sessionGrid = null
                 lastFullVisionCheckAt = 0L
             }
@@ -1662,6 +2281,7 @@ class ScreenAssistService : Service() {
             if (yoloMissStreak == 1 || yoloMissStreak % 4 == 0) {
                 setStatus("关键帧未确认：$lastFailReason\n继续从录屏流寻找稳定画面…")
             }
+            kickCapture()
             return
         }
 
@@ -1685,12 +2305,13 @@ class ScreenAssistService : Service() {
             streamAnomalyStreak++
             yoloMissStreak++
             lastFailReason = unsafe
-            if (streamAnomalyStreak >= STREAM_STABLE_FRAME_COUNT) {
+            if (streamAnomalyStreak >= STREAM_ANOMALY_GRID_RESET_MISSES) {
                 sessionGrid = null
                 lastFullVisionCheckAt = 0L
             }
             if (refresh.isActive) refresh.consumeAttempt(unsafe)
-            setStatus("关键帧局面异常：$unsafe\n继续周期重检，稳定后再计算…")
+            setStatus("关键帧局面异常：$unsafe\n正在重新识别；仍需连续8个稳定样本后才接受棋面…")
+            kickCapture()
             return
         }
 
@@ -1746,7 +2367,7 @@ class ScreenAssistService : Service() {
                 onBoardConfirmed(epoch)
             }
             BoardTracker.Event.UNSTABLE -> {
-                // 跟踪器尚未接受这张盘面时也要继续消费相邻样本；窗口本身仍保留最近八帧。
+                // 跟踪器尚未接受这张盘面时也要继续消费相邻样本；窗口本身仍保留最近八个样本。
                 stableFrameWindow.rearm()
                 cropUnstableStreak++
                 if (cropUnstableStreak >= CROP_RESET_MISSES) {
@@ -1797,7 +2418,7 @@ class ScreenAssistService : Service() {
         when (verdict) {
             LandingVerificationPolicy.Verdict.WAITING -> {
                 // 当前稳定关键帧还不能证明落子已生效；保留窗口内容，
-                // 但解除一次性释放闸门，让下一个250ms样本立即重新核对。
+                // 但解除一次性释放闸门，让下一个125ms样本立即重新核对。
                 stableFrameWindow.rearm()
                 autoLastResult = "等待确认本次落子结果"
                 requestRenderOnly()
@@ -1840,6 +2461,17 @@ class ScreenAssistService : Service() {
         if (current == null || current.token != landing.token || current.stage != LandingFlow.Stage.VERIFYING) return
         val fen = AssistBoard.toFen(board, redGo)
         val oldFen = currentFen
+        val requestedVariation = nextVariationRequest
+        val consumedVariation = if (requestedVariation != null) {
+            NextVariationPolicy.consume(requestedVariation, landing.fen, landing.ucci)
+        } else {
+            null
+        }
+        if (requestedVariation != null && consumedVariation == null) {
+            nextVariationArmed = false
+            trace("NEXT_VARIATION_EXECUTED", "position=${landing.fen} ucci=${landing.ucci}")
+        }
+        nextVariationRequest = consumedVariation
         val result = RecognitionResult(
             AssistBoard.clone(board),
             mapped.screenRaw,
@@ -1919,7 +2551,12 @@ class ScreenAssistService : Service() {
                 // 这是当前关键帧自身的异常：只拒绝并清空跟踪候选，等待下一组录屏样本。
                 // 不把旧棋面复制回候选，也不以旧棋面补齐缺失棋子。
                 tracker.reset(currentRedGo)
-                setStatus("棋面结构异常：$unsafe\n拒绝当前关键帧，继续周期重检…")
+                stableFrameWindow.rearm()
+                lastFailReason = unsafe
+                yoloMissStreak = maxOf(yoloMissStreak, 1)
+                setStatus("棋面结构异常：$unsafe\n拒绝当前关键帧，正在重新识别…")
+                kickCapture()
+                requestWatchdog()
                 return@post
             }
 
@@ -2059,6 +2696,11 @@ class ScreenAssistService : Service() {
 
     private fun resetSuggestionState(newAnalysisCycle: Boolean = false) {
         if (newAnalysisCycle) analysisCycleGate.invalidate()
+        // 变招是面向“下一次实际我方落子”的存量意图，不随分析周期或对方回合自动丢失。
+        // 旧局面的具体候选不能跨盘面复用；意图本身保留，等新局面的候选出现后重新绑定。
+        if (!nextVariationArmed || nextVariationRequest?.position?.let { it != currentFen } == true) {
+            nextVariationRequest = null
+        }
         analyzedFen = ""   // 兼容旧诊断字段；真正的周期闸门由analysisCycleGate控制。
         expectedAnalysisId = 0L
         lastAnalysis = null
@@ -2067,6 +2709,63 @@ class ScreenAssistService : Service() {
         stableUcci = null
         stableSince = 0L
         searchSettled = false
+        previewSnapshot.clear()
+    }
+
+    private fun candidateUccis(): List<String> = bookMoves?.map { it.move }
+        ?: lastAnalysis?.lines?.mapNotNull { it.pv.firstOrNull() }.orEmpty()
+
+    private fun defaultAdviceUcci(): String? {
+        bookMoves?.firstOrNull()?.let { return it.move }
+        val result = lastAnalysis ?: return null
+        val best = result.lines.firstOrNull { it.multiPv == 1 } ?: result.bestLine
+        return best?.pv?.firstOrNull() ?: result.bestMove ?: result.bestUcci
+    }
+
+    /**
+     * 将已存量的变招意图绑定到当前这一手我方局面。
+     * 对方回合、尚无棋面或尚无候选时只保持等待，不把请求错误绑定到对方预案。
+     */
+    private fun nextVariationResolution(): NextVariationPolicy.Resolution {
+        if (!nextVariationArmed) {
+            return NextVariationPolicy.Resolution(null, null, null, false)
+        }
+        if (currentFen.isEmpty() || currentRedGo != mySideIsRed()) {
+            return NextVariationPolicy.Resolution(
+                nextVariationRequest,
+                null,
+                null,
+                waitingForAlternative = true,
+            )
+        }
+        val request = nextVariationRequest?.takeIf { it.position == currentFen }
+            ?: NextVariationPolicy.request(
+                position = currentFen,
+                defaultUcci = defaultAdviceUcci(),
+                candidates = candidateUccis(),
+                current = null,
+            ).also { nextVariationRequest = it }
+        val resolution = NextVariationPolicy.resolve(
+            request = request,
+            position = currentFen,
+            candidates = candidateUccis(),
+            currentDefaultUcci = defaultAdviceUcci(),
+        )
+        nextVariationRequest = if (resolution.invalidated) null else resolution.request
+        return resolution
+    }
+
+    private fun clearNextVariationRequest() {
+        val old = nextVariationRequest
+        val wasArmed = nextVariationArmed
+        nextVariationRequest = null
+        nextVariationArmed = false
+        if (old != null || wasArmed) {
+            trace(
+                "NEXT_VARIATION_CLEAR",
+                "position=${old?.position ?: "unbound"} preferred=${old?.preferredUcci ?: "none"}",
+            )
+        }
     }
 
     /** MoveChinese.describe 容错版：解析失败时原样返回 UCCI */
@@ -2501,6 +3200,7 @@ class ScreenAssistService : Service() {
         overlayBall = null
         overlayBallParams = null
         postRender()
+        refreshForegroundNotification()
     }
 
     private fun ensureBall(): OverlayBallView? {
@@ -2579,7 +3279,7 @@ class ScreenAssistService : Service() {
     }
 
     /**
-     * 持续录屏回调：始终消费ImageReader缓冲；每250ms只取一个样本。
+     * 持续录屏回调：始终消费ImageReader缓冲；每125ms只取一个样本。
      * 连续八个样本稳定后挑最清晰的一帧，才进入一次TFLite识别。
      */
     private fun onImageAvailable(reader: ImageReader) {
@@ -2611,10 +3311,17 @@ class ScreenAssistService : Service() {
     /** 把一帧录屏样本加入稳定窗口；此处不做模型推理。 */
     private fun consumeStreamSample(frame: Frame, epoch: Long, now: Long) {
         if (epoch != recognitionEpoch || stopping || overlayClosed) return
+        // 框选层本身也是悬浮窗：调整期间不消费像素，避免把压暗层识别成棋盘。
+        if (boardRegionEditing) return
+        lastProcessedSampleAt = now
         val excluded = panelRectInFrame(frame.width, frame.height)
         if (excluded != null) maskRegion(frame, excluded, LETTERBOX_GRAY)
 
-        val result = stableFrameWindow.accept(frame, epoch, now)
+        val result = stableFrameWindow.accept(
+            frame, epoch, now,
+            // 已框选时签名只覆盖框内：框外的动画、弹层与系统栏变化不再推动稳定窗口。
+            signatureRegion = config.boardRegion?.let { BoardRegionGeometry.fromArray(it) }?.boundsArray(),
+        )
         stableFrameCount = result.stableCount
         if (result.restartedByChange) {
             // 动画/移动/遮挡只会让当前窗口失效；不拿上一关键帧或上一棋面补齐。
@@ -2637,11 +3344,13 @@ class ScreenAssistService : Service() {
      */
     private fun publishFrames(frames: List<Frame>) {
         if (frames.isEmpty()) return
-        val item = QueuedFrame(frames, recognitionEpoch)
+        val queuedAt = System.currentTimeMillis()
+        val item = QueuedFrame(frames, recognitionEpoch, queuedAt)
         val shouldSchedule = synchronized(frameQueueLock) {
             pendingFrame = item
             if (frameConsumeScheduled) false else {
                 frameConsumeScheduled = true
+                frameConsumeScheduledAt = queuedAt
                 true
             }
         }
@@ -2652,6 +3361,7 @@ class ScreenAssistService : Service() {
                     val next = pendingFrame
                     if (next == null) {
                         frameConsumeScheduled = false
+                        frameConsumeScheduledAt = 0L
                         null
                     } else {
                         pendingFrame = null
@@ -2666,6 +3376,9 @@ class ScreenAssistService : Service() {
                         handleFrameBatch(item.frames, epoch = item.epoch)
                     }.onFailure { Log.w(TAG, "handle stable frame failed", it) }
                 } finally {
+                    if (item.epoch == recognitionEpoch) {
+                        lastRecognitionCompletedAt = System.currentTimeMillis()
+                    }
                     recognitionInFlight.set(false)
                     inferenceStartedAt = 0L
                 }
@@ -2744,18 +3457,15 @@ class ScreenAssistService : Service() {
         if (AssistPhase.needsBoard(p) && !refresh.isActive) {
             val sinceSample = if (lastStreamSampleAt == Long.MIN_VALUE) Long.MAX_VALUE
                 else now - lastStreamSampleAt
-            if (sinceSample >= STREAM_SAMPLE_PERIOD_MS * 2) kickCapture()
+            val timeout = if (p == AssistPhase.Phase.WAITING)
+                HeartbeatPolicy.WAITING_SCAN_TIMEOUT_MS else HeartbeatPolicy.OTHER_SCAN_TIMEOUT_MS
+            if (sinceSample >= timeout) kickCapture()
         }
 
-        if (p == AssistPhase.Phase.WAITING) {
-            // 等待对方时只负责“别让取帧管线停住”。对方是否已经走子，由正常的稳定关键帧识别
-            // 与跟踪器确认（新盘面确认后 onBoardConfirmed 会把轮次切回我方），
-            // 这里不再做任何差分/一两步推断，避免又造出一条会自我锁死的旁路。
-            val heartbeatBase = maxOf(lastMapAtForWatchdog, phaseSinceAt)
-            val heartbeat = HeartbeatPolicy.State(
-                lastSuccessfulScanAt = heartbeatBase,
-                lastForcedScanAt = lastWaitingForceScanAt,
-            )
+        if (HeartbeatPolicy.isScanPhase(p)) {
+            // 成功处理样本才重置阈值；非法棋面也算“通道仍在处理”，但不会成为有效棋面。
+            val heartbeatBase = lastProcessedSampleAt.takeIf { it > 0L } ?: -1L
+            val heartbeat = HeartbeatPolicy.State(heartbeatBase, lastWaitingForceScanAt)
             if (HeartbeatPolicy.shouldForceWaitingScan(p, now, heartbeat)) {
                 lastWaitingForceScanAt = now
                 kickCapture()
@@ -2833,7 +3543,7 @@ class ScreenAssistService : Service() {
                 if (refresh.checkGiveUp(now, "取画面超时（未收到可用画面）")) {
                     finishRefreshRequest()
                     syncCaptureDemand()
-                    setStatus("更新棋谱失败：${refresh.failReason}\n请确认已完成一键准备并点击一键启动")
+                    setStatus("更新棋谱失败：${refresh.failReason}\n请确认已完成一键准备后，在悬浮窗内点击开始")
                     postRender()
                 }
             }
@@ -2856,6 +3566,46 @@ class ScreenAssistService : Service() {
         }
     }
 
+    private fun closeSessionInternal(message: String) {
+        if (stopping) return
+        runCatching { persistOverlayPosNow() }
+        stopping = true
+        overlayClosed = true
+        preparedSession = false
+        foregroundPauseSnapshot = null
+        foregroundBaselinePackage = null
+        captureResumePending = false
+        pendingCaptureGrant = null
+        resumeCaptureWhenTargetReturns = false
+        resumeAuthorizationDenied = false
+        AssistAccessibilityService.setGlobalForegroundObserver(null)
+        recognitionEpoch++
+        landingToken++
+        landingState = null
+        pendingAutoMove = null
+        lastPreparedMoveKey = null
+        autoChannelRestartGeneration++
+        autoState = AutoState.IDLE
+        landingUiSuppressed = false
+        landingWasPanel = false
+        boardRegionOverlay?.let { v -> runCatching { windowManager?.removeView(v) } }
+        boardRegionOverlay = null
+        boardRegionOverlayParams = null
+        overlayPanel?.let { v -> runCatching { windowManager?.removeView(v) } }
+        overlayPanel = null
+        overlayParams = null
+        overlayBall?.let { v -> runCatching { windowManager?.removeView(v) } }
+        overlayBall = null
+        overlayBallParams = null
+        paused = true
+        releaseCapture()
+        val detector = yoloDetector
+        yoloDetector = null
+        runCatching { detector?.close() }
+        cancelForegroundNotification()
+        setStatus(message)
+    }
+
     private fun onOverlayAction(action: OverlayAction) {
         when (action) {
             OverlayAction.CYCLE_MODE -> cycleMode()
@@ -2872,43 +3622,13 @@ class ScreenAssistService : Service() {
             OverlayAction.CYCLE_STRENGTH -> cycleStrength()
             OverlayAction.TOGGLE_THINKING_MODE -> toggleThinkingMode()
             OverlayAction.CYCLE_HASH -> cycleHash()
+            OverlayAction.EDIT_BOARD_REGION -> beginBoardRegionEditing()
             OverlayAction.COLLAPSE -> collapseOverlay()
             OverlayAction.CLOSE -> {
-                // 关闭前先保存真实面板/小球几何；否则移除窗口后再销毁服务会丢失最后位置。
-                runCatching { persistOverlayPosNow() }
-                // 关闭：停止录屏、移除面板/小球（之后可在悬浮窗辅助页重新准备）
-                // 先切断所有新识别入口，再释放录屏和模型；YoloBoardDetector.close()
-                // 会与当前detect串行化，避免主线程关闭Interpreter时assist-worker仍在run。
-                stopping = true
-                overlayClosed = true
-                recognitionEpoch++
-                synchronized(frameQueueLock) {
-                    pendingFrame = null
-                    frameConsumeScheduled = false
-                }
-                landingToken++
-                landingState = null
-                pendingAutoMove = null
-                lastPreparedMoveKey = null
-                autoChannelRestartGeneration++
-                autoState = AutoState.IDLE
-                landingUiSuppressed = false
-                landingWasPanel = false
-                overlayPanel?.let { v -> runCatching { windowManager?.removeView(v) } }
-                overlayPanel = null
-                overlayParams = null
-                overlayBall?.let { v -> runCatching { windowManager?.removeView(v) } }
-                overlayBall = null
-                overlayBallParams = null
-                paused = true
-                releaseCapture()
-                // 识别线程与模型由 detector 内部生命周期闸门串行化；此调用会等待当前
-                // Interpreter.run 完成后再释放，UI线程不可能与原生推理并发close。
-                val detector = yoloDetector
-                yoloDetector = null
-                runCatching { detector?.close() }
-                setStatus("已关闭（识别与录屏均已停止，可在悬浮窗辅助页重新准备）")
-                stopSelf()
+                closePending = true
+                accessibilityShutdownInFlight = true
+                closeSessionInternal("正在关闭本应用的屏幕操作通道…")
+                revokeOwnAccessibilityAfterClose("已关闭识别、屏幕共享与悬浮窗")
             }
         }
     }
@@ -2920,23 +3640,48 @@ class ScreenAssistService : Service() {
      * - 运行中显示“暂停”，只停运行管线，不清棋谱和日志。
      */
     private fun toggleRun() {
-        val suspendedSnapshot = foregroundPauseSnapshot
-        if (suspendedSnapshot?.wasRunning == true) {
-            // 用户在临时前台保护期间点“暂停”：这是明确取消恢复意图，不是恢复。
+        val snapshot = foregroundPauseSnapshot
+        val resumeSnapshot = snapshot?.takeIf { it.suspendedByForeground && it.wasRunning }
+        if (resumeSnapshot != null) {
             foregroundPauseSnapshot = null
             pauseRuntime(clearAnalysis = true)
-            trace("RUN_PAUSE_DURING_FOREGROUND_SWITCH", "resumePackage=${suspendedSnapshot.resumePackage}")
+            trace("RUN_PAUSE_DURING_FOREGROUND_SWITCH", "resumePackage=${resumeSnapshot.resumePackage}")
             setStatus("已暂停（不会在返回原应用后自动继续）")
             postRender()
             return
         }
         if (!paused) {
-            trace("RUN_PAUSE", "landing=${landingState?.stage} searching=$searching fen=$currentFen")
-            pauseRuntime(clearAnalysis = true)
-            foregroundPauseSnapshot = null
-            setStatus("已暂停（不取帧、不识别）\n点『继续』恢复当前会话")
-            postRender()
-            return
+        val resumeSnapshot = ForegroundPausePolicy.capture(
+            paused = false,
+            resumePackage = foregroundBaselinePackage,
+            suspendedByForeground = false,
+        )
+        trace("RUN_PAUSE", "landing=${landingState?.stage} searching=$searching fen=$currentFen")
+        pauseRuntime(clearAnalysis = true)
+        foregroundPauseSnapshot = resumeSnapshot
+        setStatus(
+            if (resumeSnapshot != null)
+                "已暂停（屏幕画面未输出，授权保留；无障碍继续监听前台）\n回到原棋盘应用后点『继续』恢复"
+            else
+                "已暂停（屏幕画面未输出，授权保留；无障碍继续监听前台）\n回到应用后点『继续』恢复"
+        )
+        postRender()
+        return
+        }
+
+        if (!isCapturing() && !isCaptureThrottled()) {
+            if (!isProjectionAuthorized() || captureResumePending) {
+                captureResumeIntent = CaptureResumeIntent.USER_CONTINUE
+                requestCaptureAuthorization(CaptureResumeIntent.USER_CONTINUE)
+                return
+            }
+            if (!resumeCapturePipeline()) {
+                captureResumePending = true
+                captureResumeIntent = CaptureResumeIntent.USER_CONTINUE
+                setStatus("无法恢复原屏幕输出；请重新确认屏幕录制权限")
+                requestCaptureAuthorization(CaptureResumeIntent.USER_CONTINUE)
+                return
+            }
         }
 
         val firstStart = !runSessionStarted
@@ -2976,7 +3721,6 @@ class ScreenAssistService : Service() {
         runSessionStarted = true
         trace("RUN_RESET", "mode=$activeWorkMode auto=$autoPlayOn")
         foregroundPauseSnapshot = null
-        clearLandingTransaction(restoreWindow = true)
         stopCurrentSearch()
         searchSettled = false
         lastAnalysis = null
@@ -2984,7 +3728,8 @@ class ScreenAssistService : Service() {
         stableUcci = null
         stableSince = 0L
         resetBoard()
-        if (mediaProjection != null && imageReader != null && virtualDisplay != null) {
+        clearNextVariationRequest()
+        if (isProjectionAuthorized()) {
             resumeRuntime(rebaseBoard = false, userInitiated = true)
             setStatus("已重置并建立新的日志起点\n正在重新识盘")
         } else {
@@ -2994,10 +3739,6 @@ class ScreenAssistService : Service() {
         postRender()
     }
 
-    /**
-     * 变招浏览：候选数量由悬浮窗“候选N”档位控制；这里仅在已计算出的候选中移动显示索引，
-     * 不改变候选数量，也不启动新的搜索。
-     */
     /** 候选数量档位：1 → 2 → … → 6 → 1；所有工作模式统一使用这个持久化值。 */
     private fun cycleCandidateCount() {
         val next = if (config.candidateCount >= ThinkingOptions.MAX_CANDIDATE_COUNT) {
@@ -3019,26 +3760,37 @@ class ScreenAssistService : Service() {
         postRender()
     }
 
-    /**
-     * 候选浏览：所有路线已在同一个搜索会话中计算完，这里只移动显示索引。
-     * 到最后一条即停住，不回到第一条形成“兵→马→车→兵”的视觉循环。
-     */
+    /** 点击一次预存下一次我方变招；绿色预存态再次点击则取消，不要求用户卡在待落子阶段。 */
     private fun cycleCandidate() {
-        val count = bookMoves?.size ?: lastAnalysis?.lines?.size ?: 0
-        if (count <= 1) {
-            setStatus("当前棋面只有一个可用候选，不重新计算")
-            requestRenderOnly()
+        if (nextVariationArmed) {
+            clearNextVariationRequest()
+            setStatus("已取消下一手变招")
+            postRender()
             return
         }
-        if (selectedCandidate >= count - 1) {
-            setStatus("已看完全部 $count 条候选；自动落子仍采用排名第1的最优结果")
-            requestRenderOnly()
+        nextVariationArmed = NextVariationPolicy.toggleArmed(nextVariationArmed)
+        if (currentFen.isEmpty() || currentRedGo != mySideIsRed()) {
+            // 不把对方回合的预案或旧局面候选绑定成下一次我方着法。
+            nextVariationRequest = null
+            setStatus("下一手变招已预存；轮到我方实际落子时使用非默认候选")
+            postRender()
             return
         }
-        selectedCandidate++
-        val shown = selectedCandidate + 1
-        setStatus("已切换到候选 $shown/$count（复用本次计算结果）")
-        requestRenderOnly()
+        val moves = candidateUccis()
+        val current = nextVariationRequest?.takeIf { it.position == currentFen }
+        nextVariationRequest = NextVariationPolicy.request(
+            position = currentFen,
+            defaultUcci = defaultAdviceUcci(),
+            candidates = moves,
+            current = current,
+        )
+        val resolved = nextVariationResolution()
+        if (resolved.waitingForAlternative) {
+            setStatus("下一手变招已预存；等待当前局面的非默认候选（不会重新搜索）")
+        } else {
+            setStatus("下一手变招已预存：${resolved.ucci?.let { describeSafe(currentFen, it) } ?: "等待候选"}")
+        }
+        postRender()
     }
 
     /** 一个按钮轮换模式：自动 → 半自动 → 手动 → 自动（默认自动） */
@@ -3289,6 +4041,8 @@ class ScreenAssistService : Service() {
         clearLandingTransaction(restoreWindow = true)
         autoLastUcci = null
         autoFenAtExec = null
+        // 模式切换会改变"能不能自动落子"，旧预选快照随之作废。
+        previewSnapshot.clear()
         if (!autoPlayOn) autoLastResult = null
         else if (autoLastResult == null) autoLastResult = "已开启，等待我方定着"
 
@@ -3349,6 +4103,7 @@ class ScreenAssistService : Service() {
         // 发起一次显式刷新请求：先作废队列里的旧帧和残留稳定窗口，状态机自己负责重试与超时。
         abortCaptureWindow()
         recognitionEpoch++
+        beginVisionEpoch()
         userRefreshActive = true
         refresh.begin(System.currentTimeMillis())
         trace("REFRESH_START", "phase=${refreshPhase()} epoch=$recognitionEpoch")
@@ -3407,6 +4162,7 @@ class ScreenAssistService : Service() {
     private fun resetBoard() {
         abortCaptureWindow()
         recognitionEpoch++
+        beginVisionEpoch()
         resumeRebasePending = false
         tracker.reset(config.mySideRed)
         currentRedGo = config.mySideRed
@@ -3434,9 +4190,11 @@ class ScreenAssistService : Service() {
         yoloMissStreak = 0
         cropUnstableStreak = 0
         lastMappedAt = 0L
+        lastMapAtForWatchdog = -1L
         lastMappedPieces = 0
         lastAnchorSource = null
         lastFailReason = null
+        clearNextVariationRequest()
         postRender()
         setStatus("棋盘已重置\n等待重新识别")
     }
@@ -3647,11 +4405,10 @@ class ScreenAssistService : Service() {
         // 状态文本只触发显示刷新，绝不能因为“写了一行文字”反向启动落子。
         pendingStatusOverride = text
         requestRenderOnly()
+        // 用户已经关掉悬浮窗连线后，不再往通知栏补投递任何内容。
+        if (overlayClosed || stopping) return
         mainHandler.post {
-            runCatching {
-                val nm = getSystemService(NotificationManager::class.java)
-                nm.notify(NOTIF_ID, buildNotification(text))
-            }
+            refreshForegroundNotification()
         }
     }
 
@@ -3909,7 +4666,11 @@ class ScreenAssistService : Service() {
             }
         }
         if (currentRedGo != mySideIsRed()) return "对方回合"
-        val ucci = currentAdviceUcci() ?: return "暂无建议着法"
+        val advice = currentAdviceUcci()
+        if (advice == null) {
+            return if (nextVariationArmed) "变招已预存，等待当前局面的非默认候选" else "暂无建议着法"
+        }
+        val ucci = advice
         if (ucci == autoLastUcci) return "该着法已执行过"
         val mature = searchSettled
         if (!mature) return "建议还在变（等定着）"
@@ -3918,12 +4679,13 @@ class ScreenAssistService : Service() {
 
     // ==================== 自动走子 ====================
 
-    /**
-     * 自动/手动执行始终采用本次统一预算下排名第一的最优候选。
-     * `selectedCandidate` 只影响悬浮窗浏览，绝不改变实际落子，也不会触发重算。
-     */
-    /** 当前**实际展示**的候选箭头对应的着法（受“变招”浏览索引影响）。 */
+    /** Executes the default best move unless a pending one-shot next-variation request overrides it. */
+    /** 当前展示的候选箭头对应的着法；变招已预存时仅在我方局面绑定非默认候选。 */
     private fun currentShownUcci(): String? {
+        if (nextVariationArmed && currentRedGo == mySideIsRed()) {
+            val pending = nextVariationResolution()
+            if (nextVariationRequest != null) return pending.ucci
+        }
         bookMoves?.let { book ->
             if (book.isNotEmpty()) {
                 val idx = selectedCandidate.coerceIn(0, book.size - 1)
@@ -3937,6 +4699,9 @@ class ScreenAssistService : Service() {
     }
 
     private fun currentAdviceUcci(): String? {
+        if (nextVariationArmed && currentRedGo == mySideIsRed()) {
+            return nextVariationResolution().ucci
+        }
         val book = bookMoves
         if (!book.isNullOrEmpty()) return book.first().move
         val a = lastAnalysis ?: return null
@@ -3964,7 +4729,9 @@ class ScreenAssistService : Service() {
             sessionGrid == null -> "正在寻找棋盘"
             currentPieces == null || currentFen.isEmpty() -> "还没有识别到局面"
             currentRedGo != mySideIsRed() -> "现在不是我方回合（双击可切换走棋方）"
-            currentAdviceUcci() == null -> "还没有可走的建议"
+            currentAdviceUcci() == null -> if (nextVariationArmed)
+                "变招已预存，正在等待当前局面的非默认候选，尚未执行默认着法"
+            else "还没有可走的建议"
             else -> null
         }
         if (reason != null) {
@@ -4097,6 +4864,15 @@ class ScreenAssistService : Service() {
         executeAutoMove(plan, fen)
     }
 
+    /** 改变触摸目标上下文时同时作废盘面点位、选中回执及旧回调；保留实际点击间隔账本。 */
+    private fun invalidateCandidatePreview() {
+        previewState.clear()
+        previewSnapshot.clear()
+        previewAccessibilityInstance = null
+        previewGestureToken++
+        previewGestureInFlight = false
+    }
+
     /** 清掉当前落子事务并让所有旧回调失效。 */
     private fun clearLandingTransaction(restoreWindow: Boolean) {
         trace(
@@ -4108,16 +4884,16 @@ class ScreenAssistService : Service() {
         // 录制/识别管线还要继续被守着（用户那次“卡住”就是事务没了、管线也停了）。
         landingToken++
         // 落子事务结束/作废：候选预选状态一并失效，避免旧的“已选中起点”被下一次落子误用。
-        previewState.clear()
-        previewGestureToken++
-        previewGestureInFlight = false
-        pendingAutoMove = null
+        invalidateCandidatePreview()
+
         lastPreparedMoveKey = null
         autoChannelRestartGeneration++
         readyChannelRestartedForPhaseAt = Long.MIN_VALUE
         landingState = null
         autoState = AutoState.IDLE // 兼容旧展示字段；阶段机只认 landingState
         autoBoardAtExec = null
+        // 落子事务收尾：预选快照已完成使命，防止被下一手误用。
+        previewSnapshot.clear()
         autoFenAtExec = null
         phase = if (paused) AssistPhase.Phase.PAUSED else AssistPhase.Phase.FINDING
         phaseSinceAt = System.currentTimeMillis()
@@ -4188,8 +4964,8 @@ class ScreenAssistService : Service() {
     /**
      * 蓝色候选箭头的**起点预选**（由分析回调驱动，渲染函数绝不参与）。
      *
-     * 每当界面展示的候选箭头换成一个新的合法候选，就异步按住它的起点一次，
-     * 让棋盘出现“把棋子拿起来”的动效；不会点终点，因此不会真的走子。
+     * 每当界面展示的候选箭头换成一个新的合法候选，就点按它的起点一次，
+     * 让棋盘将该棋子标为当前选中目标；不会点终点，因此不会真的走子。
      *
      * 去重、模式限制、棋面/会话失效、手势完成回执统一由
      * [CandidatePreviewPolicy] 与 [CandidatePreviewState]（纯 JVM）决定。
@@ -4197,9 +4973,11 @@ class ScreenAssistService : Service() {
     private fun scheduleCandidateOriginPreview(ucci: String?) {
         if (ucci == null) return
         if (previewGestureInFlight) {
-            if (System.currentTimeMillis() - previewGestureStartedAt < 1500L) return
+            if (android.os.SystemClock.elapsedRealtime() - previewGestureStartedAt < 1500L) return
             previewGestureInFlight = false
             previewGestureToken++
+            previewAccessibilityInstance = null
+            previewSnapshot.clear()
             trace("PREVIEW_TIMEOUT", "ucci=$ucci")
         }
         if (landingState != null || pendingAutoMove != null || autoChannelRestartInFlight.get()) return
@@ -4207,6 +4985,13 @@ class ScreenAssistService : Service() {
         val grid = sessionGrid ?: return
         val pieces = currentPieces ?: return
         // 换棋面/换分析会话 → 旧的预选状态立即失效。
+        val previousPreviewContext = previewState.snapshot()
+        if (previousPreviewContext.fen != currentFen || previousPreviewContext.analysisId != expectedAnalysisId) {
+            previewAccessibilityInstance = null
+            previewSnapshot.clear()
+            previewGestureToken++
+            previewGestureInFlight = false
+        }
         previewState.onContext(currentFen, expectedAnalysisId)
         val snap = previewState.snapshot()
         val decision = CandidatePreviewPolicy.decidePreview(
@@ -4228,16 +5013,33 @@ class ScreenAssistService : Service() {
         )
         if (decision != CandidatePreviewPolicy.PreviewDecision.DISPATCH_ORIGIN_PREVIEW) return
 
-        val now = System.currentTimeMillis()
-        if (now - lastPreviewDispatchAt < CANDIDATE_PREVIEW_MIN_GAP_MS) return
+        val now = android.os.SystemClock.elapsedRealtime()
+        if (!CandidatePreviewPolicy.gapSatisfied(
+                now,
+                lastPreviewDispatchAt,
+                requiredPreviewSwitchGapMs,
+            )
+        ) return
+        val snapshotCapturedAt = System.currentTimeMillis()
         val (fw, fh) = config.frameSize
         val plan = AutoMovePlanner.plan(
             ucci, grid, currentOrientation, fw, fh, pieces, mySideIsRed()
         )?.let { toScreenPlan(it) } ?: return
         val access = AssistAccessibilityService.instance ?: return
 
-        lastPreviewDispatchAt = now
-        val token = previewState.markDispatched(CandidatePreviewPolicy.originOf(ucci))
+        val pending = previewState.markDispatched(CandidatePreviewPolicy.originOf(ucci))
+        // 预选这一刻的棋面、分析会话和已经算好的落点一起记下来：
+        // 正式落子时直接复用，不再把棋盘识别一遍（中间不会有人动棋盘）。
+        previewSnapshot.capture(
+            fen = currentFen,
+            analysisId = expectedAnalysisId,
+            ucci = plan.ucci,
+            fromX = plan.fromX,
+            fromY = plan.fromY,
+            toX = plan.toX,
+            toY = plan.toY,
+            now = snapshotCapturedAt,
+        )
         val gestureToken = ++previewGestureToken
         previewGestureInFlight = true
         previewGestureStartedAt = now
@@ -4247,12 +5049,20 @@ class ScreenAssistService : Service() {
         // 否则全局无障碍手势可能落在本应用的悬浮窗上，目标棋盘看不到任何动作。
         setPanelTouchable(false)
         val accepted = runCatching {
-            access.pressAndHold(plan.fromX, plan.fromY) { completed ->
+            access.previewSelectOrigin(plan.fromX, plan.fromY) { completed ->
                 mainHandler.post {
+                    previewState.markCompleted(pending, completed)
                     if (gestureToken == previewGestureToken) {
                         previewGestureInFlight = false
+                        if (completed && AssistAccessibilityService.instance === access &&
+                            previewState.snapshot().requestToken == pending
+                        ) {
+                            previewAccessibilityInstance = access
+                        } else {
+                            previewAccessibilityInstance = null
+                            previewSnapshot.clear()
+                        }
                     }
-                    previewState.markCompleted(token, completed)
                     trace("PREVIEW_RESULT", "ucci=${plan.ucci} completed=$completed current=$gestureToken/$previewGestureToken")
                     Log.i(TAG, "candidate preview result analysis=$expectedAnalysisId ucci=${plan.ucci} completed=$completed")
                     if (landingState == null && pendingAutoMove == null && !autoChannelRestartInFlight.get()) {
@@ -4262,9 +5072,18 @@ class ScreenAssistService : Service() {
                 }
             }
         }.getOrDefault(false)
+        if (accepted) {
+            // 只为系统接受派发的选中点按记时并抽取下一次间隔；被拒绝的请求不伪装成点击。
+            lastPreviewDispatchAt = android.os.SystemClock.elapsedRealtime()
+            requiredPreviewSwitchGapMs = CandidatePreviewPolicy.randomizedPreviewSwitchGapMs(random)
+        }
         if (!accepted) {
-            if (gestureToken == previewGestureToken) previewGestureInFlight = false
-            previewState.markCompleted(token, false)
+            if (gestureToken == previewGestureToken) {
+                previewGestureInFlight = false
+                previewAccessibilityInstance = null
+            }
+            previewState.markCompleted(pending, false)
+            previewSnapshot.clear()
             trace("PREVIEW_DISPATCH_FAILED", "ucci=${plan.ucci}")
             if (landingState == null && pendingAutoMove == null && !autoChannelRestartInFlight.get()) {
                 setPanelTouchable(true)
@@ -4310,8 +5129,28 @@ class ScreenAssistService : Service() {
 
         val sim = config.simEnabled
         val (cw, ch) = cellSize()
-        val target = if (sim && cw > 0f && ch > 0f)
-            AutoMovePlanner.applyJitter(plan, cw, ch, random) else plan
+        // 预选时已经记下"棋子在哪、要点哪里"：正式落子直接沿用那份落点，
+        // 不再依赖一次新的棋盘识别。识图只为算出落点，点位本身不会因为再识别一次而变准。
+        val snapshot = previewSnapshot.reusableFor(
+            fen = fen,
+            analysisId = expectedAnalysisId,
+            maxAgeMs = PreviewBoardSnapshot.MAX_AGE_MS,
+            now = System.currentTimeMillis(),
+        )?.takeIf { it.ucci == plan.ucci }
+        val target = if (snapshot != null) {
+            trace("MOVE_SNAPSHOT_REUSE", "ucci=${snapshot.ucci} age=${System.currentTimeMillis() - snapshot.capturedAt}")
+            AutoMove(
+                ucci = plan.ucci,
+                fromX = snapshot.fromX,
+                fromY = snapshot.fromY,
+                toX = snapshot.toX,
+                toY = snapshot.toY,
+            )
+        } else if (sim && cw > 0f && ch > 0f) {
+            AutoMovePlanner.applyJitter(plan, cw, ch, random)
+        } else {
+            plan
+        }
         val tapGapMs = MoveTimingPolicy.randomizedTapGapMs(AUTO_TAP_GAP_BASE_MS, random)
         trace(
             "MOVE_TIMING",
@@ -4343,9 +5182,18 @@ class ScreenAssistService : Service() {
             // 系统切窗或服务状态丢失；此时直接回退完整起点→终点，避免永久卡死。
             autoLastResult = "预选未回执，改用完整落子手势"
         }
-        // 无论自动还是手动，正式落子前都会执行通道保险；保险可能取消尚未完成的起点预选。
-        // 因此保险通过后一律发送完整起点→终点手势，不能只补终点。
-        val reuseSelectedOrigin = false
+        // 只有自动落子且同局面/同会话的预选起点手势已完成时，正式手势才只需点击终点。
+        // 预选未完成、上下文不匹配或人工触发时，都保留完整起点→终点安全回退。
+        val reuseSelectedOrigin = CandidatePreviewPolicy.shouldReuseSelectedOrigin(
+            decision = finalDecision,
+            requireAutoSwitch = requireAutoSwitch,
+            snapshotMatches = snapshot != null,
+            sameAccessibilityInstance = previewAccessibilityInstance != null &&
+                previewAccessibilityInstance === AssistAccessibilityService.instance,
+        )
+        if (reuseSelectedOrigin) {
+            trace("MOVE_REUSE_PRESELECTED_ORIGIN", "ucci=${target.ucci}; tap destination only")
+        }
 
         // 先保存不可变请求；通道保险完成前不创建 LandingFlow，避免界面先显示“落子中”。
         val pending = PendingAutoMove(
@@ -4355,16 +5203,20 @@ class ScreenAssistService : Service() {
             reuseSelectedOrigin = reuseSelectedOrigin,
             requireAutoSwitch = requireAutoSwitch,
             createdAt = System.currentTimeMillis(),
+            pinnedBySnapshot = snapshot != null,
+            preselectionAccessibilityInstance = previewAccessibilityInstance.takeIf { reuseSelectedOrigin },
         )
         trace(
             "MOVE_PENDING",
             "ucci=${target.ucci} fen=$fen attempt=${autoMoveAttempts + 1} requireAuto=$requireAutoSwitch"
         )
         pendingAutoMove = pending
+        // 落子事务开始前冻结已完成的选择；若事务失效并回退，必须重新选中起点。
         previewState.clear()
         previewGestureToken++
         previewGestureInFlight = false
-        lastPreviewDispatchAt = 0L
+        previewAccessibilityInstance = null
+        previewSnapshot.clear()
         prepareAutoMoveChannel(pending, tapGapMs)
     }
 
@@ -4430,28 +5282,43 @@ class ScreenAssistService : Service() {
             }, ACCESSIBILITY_RECOVERY_INTERVAL_MS)
             return
         }
+        val reuseSelectedOrigin = pending.reuseSelectedOrigin &&
+            pending.preselectionAccessibilityInstance === access
+        if (pending.reuseSelectedOrigin && !reuseSelectedOrigin) {
+            trace("MOVE_PRESELECTION_INSTANCE_CHANGED", "ucci=${pending.target.ucci}; use full from-to gesture")
+        }
         val pieces = currentPieces
-        if (pieces == null || !AssistBoard.isLegalMoveInModel(pieces, pending.target.ucci, mySideIsRed())) {
+        val legal = pieces != null && AssistBoard.isLegalMoveInModel(pieces, pending.target.ucci, mySideIsRed())
+        if (!legal && !pending.pinnedBySnapshot) {
             pendingAutoMove = null
             lastPreparedMoveKey = null
             notifyBoardProblem("建议着法与当前棋面不一致")
             requestAutoDrive()
             return
         }
-        when (AutoLanding.preCheck(adviceBoard, lastSeen?.board, config.matchTolerance)) {
-            AutoLanding.PreVerdict.STALE -> {
-                pendingAutoMove = null
-                lastPreparedMoveKey = null
-                restartAnalysisForNewBoard("局面已变，已重新计算")
-                return
+        if (!legal) {
+            trace("MOVE_SNAPSHOT_LEGALITY_TRUSTED", "ucci=${pending.target.ucci}; retain preselection board/point snapshot")
+        }
+        // 落点来自预选快照时，这一步不再因为"识别抖动"推翻已经算好的点位：
+        // 识图只服务于算哪里，再识别一次并不会让点位更准，中间也没有人动过棋盘。
+        if (!pending.pinnedBySnapshot) {
+            when (AutoLanding.preCheck(adviceBoard, lastSeen?.board, config.matchTolerance)) {
+                AutoLanding.PreVerdict.STALE -> {
+                    pendingAutoMove = null
+                    lastPreparedMoveKey = null
+                    restartAnalysisForNewBoard("局面已变，已重新计算")
+                    return
+                }
+                AutoLanding.PreVerdict.UNKNOWN -> {
+                    pendingAutoMove = null
+                    lastPreparedMoveKey = null
+                    requestAutoDrive()
+                    return
+                }
+                AutoLanding.PreVerdict.MATCH -> Unit
             }
-            AutoLanding.PreVerdict.UNKNOWN -> {
-                pendingAutoMove = null
-                lastPreparedMoveKey = null
-                requestAutoDrive()
-                return
-            }
-            AutoLanding.PreVerdict.MATCH -> Unit
+        } else {
+            trace("MOVE_PRECHECK_SNAPSHOT", "ucci=${pending.target.ucci} 采用预选快照点位，跳过重复识图")
         }
 
         val target = pending.target
@@ -4496,7 +5363,7 @@ class ScreenAssistService : Service() {
                         }
                     }
                     if (!accepted) abortLandingGesture(token, "拖动手势未被无障碍服务接受")
-                } else if (pending.reuseSelectedOrigin) {
+                } else if (reuseSelectedOrigin) {
                     // 起点已被预选手势按住并完成：只补一下终点。
                     val accepted = access.tap(target.toX, target.toY) { completed ->
                         mainHandler.post {
@@ -4578,14 +5445,7 @@ class ScreenAssistService : Service() {
         }
     }
 
-    /**
-     * 棋面异常时的统一提示。
-     *
-     * 历史上这里挂着一套「非法棋面恢复」状态机：它会持续重识别并反过来锁住刷新请求，
-     * 一旦某个状态位没被复位，整个识别循环就永久卡死。现在只做两件事：
-     * 1. 如实把原因写进状态栏（节流，避免每帧刷屏）；
-     * 2. 什么都不锁——连续模式下录屏流本来就一直跑，下一组稳定样本自然会重试。
-     */
+    /** Reject the unsafe position, preserve its reason, and immediately request a paced next sample. */
     private fun notifyBoardProblem(reason: String) {
         if (paused || manualMode || overlayClosed) {
             setStatus("棋面不合法：$reason")
@@ -4593,7 +5453,9 @@ class ScreenAssistService : Service() {
         }
         yoloMissStreak = maxOf(yoloMissStreak, 1)
         lastFailReason = reason
-        setStatus("棋面仍不合法：$reason\n拒绝当前关键帧，继续录屏稳定窗口轮询识别…")
+        setStatus("棋面仍不合法：$reason\n当前局面已拒绝，正在重新识别…")
+        kickCapture()
+        requestWatchdog()
     }
 
     /**
@@ -4635,6 +5497,7 @@ class ScreenAssistService : Service() {
         }
         // 小球仍可能压住某个格；真正让点击穿透的是 NOT_TOUCHABLE，而不是透明度。
         setPanelTouchable(false)
+        refreshForegroundNotification()
     }
 
     /**
@@ -4653,6 +5516,7 @@ class ScreenAssistService : Service() {
             ensureOverlay()
         }
         requestRenderOnly()
+        refreshForegroundNotification()
     }
 
     /**
@@ -4740,6 +5604,7 @@ class ScreenAssistService : Service() {
         return doubleArrayOf(cx0, cy0, cx0 + w, cy0 + h)
     }
 
+
     /** 模型按当前定位策略只运行一次：稳定关键帧通常使用棋盘裁剪，周期到期时用整屏重新定位。 */
     private fun detectVision(
         frame: Frame,
@@ -4747,7 +5612,13 @@ class ScreenAssistService : Service() {
         excluded: IntArray?,
     ): DetectionBoardMapper.MappedBoard? {
         val grid = sessionGrid
-        val crop = grid?.let { cropHintForGrid(frame, it) }
+        val region = config.boardRegion?.let { BoardRegionGeometry.fromArray(it) }
+        // 已框选时，整屏定位与裁剪推理都收在框选范围内；未框选才按整屏找。
+        val regionCrop = region?.let { BoardRegionGeometry.toFramePixels(it, frame.width, frame.height) }
+        val crop = BoardRegionGeometry.intersectCrop(
+            grid?.let { cropHintForGrid(frame, it) },
+            regionCrop,
+        )
         val anchor = grid?.let {
             DetectionBoardMapper.AnchorHint(
                 it.nx0 * frame.width, it.ny0 * frame.height,
@@ -4758,8 +5629,8 @@ class ScreenAssistService : Service() {
         val fullDue = crop == null || now - lastFullVisionCheckAt >= FULL_VISION_RECHECK_MS
         if (fullDue) {
             lastFullVisionCheckAt = now
-            // 本次稳定关键帧只执行一次整屏推理；下一次样本再切换到裁剪定位。
-            return yolo.detect(frame, null, null, excluded)
+            // 本次稳定关键帧只执行一次整屏/框选范围推理；下一次样本再切换到裁剪定位。
+            return yolo.detect(frame, regionCrop, null, excluded)
         }
         // 已有网格时只执行一次裁剪推理；锚点仅提供几何基准，不替换当前类别。
         return yolo.detect(frame, crop, anchor, excluded)
@@ -4800,9 +5671,19 @@ class ScreenAssistService : Service() {
         val turnRed = currentRedGo
         val myTurn = if (fen.isEmpty()) false else (turnRed == myRed)
 
-        // 选择当前展示的候选
+        // 变招意图可在任意阶段预存；只有轮到我方时才把它绑定到当前候选。
         val lines = a?.lines ?: emptyList()
-        val line = if (lines.isNotEmpty()) lines[selectedCandidate.coerceIn(0, lines.size - 1)] else null
+        val variation = if (nextVariationArmed && myTurn) nextVariationResolution() else null
+        val variationWaiting = nextVariationArmed && myTurn &&
+            (variation == null || variation.waitingForAlternative)
+        val variationStoredForLater = nextVariationArmed && !myTurn
+        val lineIndex = when {
+            variationWaiting -> -1
+            variation?.candidateIndex != null -> variation.candidateIndex
+            else -> selectedCandidate
+        }
+        val line = if (lineIndex >= 0 && lines.isNotEmpty())
+            lines[lineIndex.coerceIn(0, lines.size - 1)] else null
 
         // 左列多行小字（\n 分行）；尚未识别到局面时留空，避免与状态行重复
         var headText = when {
@@ -4815,7 +5696,7 @@ class ScreenAssistService : Service() {
         // 识别中断/持续不稳定时，旧建议所依据的局面可能已失效——不再展示，避免误导
         // （手动模式局面由用户维护，不受识别健康度影响）
         val recHealthy = manualMode || (yoloMissStreak == 0 && tracker.unstableStreak < 5)
-        val book = if (myTurn) bookMoves else null
+        val book = if (myTurn && !variationWaiting) bookMoves else null
 
         // 送子防线：着法起点必须是我方棋子——轮次错乱/幽灵 FEN 时宁可不显示
         fun fromIsOurs(ucci: String): Boolean {
@@ -4829,9 +5710,15 @@ class ScreenAssistService : Service() {
         }
 
         when {
+            variationWaiting -> {
+                headText = "下一手变招已预存\n等待当前局面的非默认候选\n$headText"
+            }
+            variationStoredForLater -> {
+                headText = "下一手变招已预存\n待我方下一次实际落子\n$headText"
+            }
             myTurn && recHealthy && book != null && book.isNotEmpty() -> {
                 // 开局库命中：直接展示库内着法（定着绿✓，零等待）
-                val idx = selectedCandidate.coerceIn(0, book.size - 1)
+                val idx = (variation?.candidateIndex ?: selectedCandidate).coerceIn(0, book.size - 1)
                 val bd = book[idx]
                 val ucci = bd.move
                 if (fromIsOurs(ucci)) {
@@ -4840,7 +5727,11 @@ class ScreenAssistService : Service() {
                     arrowFrom = arrow.first
                     arrowTo = arrow.second
                     val chs = describeSafe(fen, ucci)
-                    val tag = if (idx > 0) "开局库备选${idx + 1} $chs ✓" else "开局库 $chs ✓"
+                    val tag = when {
+                        nextVariationArmed -> "下一手变招 $chs ✓"
+                        idx > 0 -> "开局库备选${idx + 1} $chs ✓"
+                        else -> "开局库 $chs ✓"
+                    }
                     // 库内 vwin/vdraw/vlost 是胜/和/负**场数**，与 WDL 用同一套精确公式：
                     // 裁剪负值 → 归一化 → 和棋算半胜 → 四舍五入到两位小数。
                     val bookRate = AssistHud.winRateFromCounts(
@@ -4861,7 +5752,12 @@ class ScreenAssistService : Service() {
                     val arrow = ucciToCells(ucci)
                     arrowFrom = arrow.first
                     arrowTo = arrow.second
-                    val tag = if (selectedCandidate > 0) "备选${selectedCandidate + 1} $chs" else "建议 $chs"
+                    val displayIndex = lineIndex.coerceIn(0, (lines.size - 1).coerceAtLeast(0))
+                    val tag = when {
+                        nextVariationArmed -> "下一手变招 ${describeSafe(fen, ucci)}"
+                        displayIndex > 0 -> "备选${displayIndex + 1} $chs"
+                        else -> "建议 $chs"
+                    }
                     val suffix = if (suggestMature) " ✓" else "（暂定）"
                     headText = "$tag$suffix\n${lineScoreText(line)} 深度${line.depth}\n$headText"
                 } else if (ucci != null) {
@@ -4899,15 +5795,16 @@ class ScreenAssistService : Service() {
             modeText = WorkModes.name(currentMode()),
             autoPlay = autoPlayOn,
             running = !paused,
-            suspendedByForeground = foregroundPauseSnapshot?.wasRunning == true,
+            suspendedByForeground = foregroundPauseSnapshot?.suspendedByForeground == true,
             hasRunSession = runSessionStarted,
-            sim = config.simEnabled,
-            strengthText = strengthButtonText(),
+            sim = config.simEnabled,            strengthText = strengthButtonText(),
             mySideText = if (myRed) "己方红" else "己方黑",
             candidateCountText = "候选${config.candidateCount}",
             hashText = hashButtonText(),
             manualMode = manualMode,
             selectedCell = manualSelected,
+            boardRegionConfigured = config.boardRegionConfigured,
+            nextVariationPending = nextVariationArmed,
             ringColor = AssistHud.ringColor(resolvedStage),
         ))
     }
@@ -4932,12 +5829,14 @@ class ScreenAssistService : Service() {
         // 的同一把锁自然排空，禁止在Interpreter.run期间并发close。
         stopping = true
         overlayClosed = true
+        AssistAccessibilityService.setGlobalForegroundObserver(null)
         recognitionEpoch++
         landingToken++
         landingState = null
         pendingAutoMove = null
         lastPreparedMoveKey = null
         previewState.clear()
+        previewSnapshot.clear()
         abortCaptureWindow()
         mainHandler.removeCallbacksAndMessages(null)
         workerHandler.removeCallbacksAndMessages(null)
@@ -4945,6 +5844,8 @@ class ScreenAssistService : Service() {
         // 退出/被杀前把悬浮窗位置存下来，下次启动还原到同一处
         runCatching { persistOverlayPosNow() }
         Log.i(TAG, "service destroyed")
+        preparedSession = false
+        captureResumePending = false
         releaseCapture()
         val detectorToClose = yoloDetector
         yoloDetector = null
@@ -4975,6 +5876,105 @@ class ScreenAssistService : Service() {
         if (overlayBallParams != null) saveBallPos()
     }
 
+    /** 暂停但授权和原虚拟显示仍有效时，换一个ImageReader重新接回同一个VirtualDisplay。 */
+    private fun resumeCapturePipeline(): Boolean {
+        if (capturePipelineActive && imageReader != null && virtualDisplay != null) return true
+        val projection = mediaProjection ?: run {
+            captureResumePending = true
+            return false
+        }
+        val display = retainedPausedVirtualDisplay ?: virtualDisplay ?: run {
+            releaseCapture()
+            captureResumePending = true
+            return false
+        }
+        val width = capturePipelineWidth.coerceAtLeast(1)
+        val height = capturePipelineHeight.coerceAtLeast(1)
+        val reader = runCatching {
+            ImageReader.newInstance(width, height, PixelFormat.RGBA_8888, 2).also {
+                it.setOnImageAvailableListener(::onImageAvailable, captureHandler)
+            }
+        }.getOrNull() ?: run {
+            releaseCapture()
+            captureResumePending = true
+            return false
+        }
+        val attached = runCatching {
+            display.setSurface(reader.surface)
+            true
+        }.getOrDefault(false)
+        if (!attached) {
+            runCatching { reader.setOnImageAvailableListener(null, null) }
+            runCatching { reader.close() }
+            trace("CAPTURE_SURFACE_RESUME_FAILED", "size=${width}x${height}")
+            releaseCapture()
+            captureResumePending = true
+            return false
+        }
+        imageReader = reader
+        virtualDisplay = display
+        retainedPausedVirtualDisplay = null
+        capturePipelineActive = true
+        captureStartedAt = System.currentTimeMillis()
+        lastStreamFrameAt = 0L
+        streamStartedAt = 0L
+        lastStableWindowAt = 0L
+        lastVisionAt = 0L
+        lastStreamSampleAt = Long.MIN_VALUE
+        abortCaptureWindow()
+        trace("CAPTURE_SURFACE_RESUMED", "sameVirtualDisplay=true size=${width}x${height}")
+        return projection === mediaProjection
+    }
+
+    /** 暂停仅断开输出surface、关闭帧读取器；不停止投影授权，不释放虚拟显示。 */
+    private fun pauseCapturePipeline(): Boolean {
+        if (!retainProjectionWhilePaused) {
+            releaseCapture()
+            return false
+        }
+        val projection = mediaProjection ?: run {
+            releaseCapture()
+            return false
+        }
+        val display = virtualDisplay ?: run {
+            releaseCapture()
+            return false
+        }
+        if (!capturePipelineActive && imageReader == null && retainedPausedVirtualDisplay === display) {
+            return projection === mediaProjection
+        }
+        capturePipelineActive = false
+        disarmPipelineWatchdog()
+        abortCaptureWindow()
+        synchronized(frameQueueLock) {
+            pendingFrame = null
+            frameConsumeScheduled = false
+            frameConsumeScheduledAt = 0L
+        }
+        runCatching { imageReader?.setOnImageAvailableListener(null, null) }
+        val disconnected = runCatching {
+            display.setSurface(null)
+            true
+        }.getOrDefault(false)
+        if (!disconnected) {
+            trace("CAPTURE_SURFACE_PAUSE_FAILED", "fallback=stop_projection")
+            releaseCapture()
+            return false
+        }
+        runCatching { imageReader?.close() }
+        imageReader = null
+        retainedPausedVirtualDisplay = display
+        captureStartedAt = 0L
+        lastStreamFrameAt = 0L
+        streamStartedAt = 0L
+        lastStableWindowAt = 0L
+        lastVisionAt = 0L
+        inferenceStartedAt = 0L
+        trace("CAPTURE_SURFACE_PAUSED", "projectionRetained=true virtualDisplayRetained=true")
+        refreshForegroundServiceTypeForCaptureState()
+        return true
+    }
+
     private fun releaseCapture() {
         // 录屏服务可能被系统直接打断：必须先把抓帧窗口事务作废并恢复正确形态，
         // 不能留下“面板被收走了、球或面板都没了”的状态。
@@ -4983,15 +5983,37 @@ class ScreenAssistService : Service() {
         synchronized(frameQueueLock) {
             pendingFrame = null
             frameConsumeScheduled = false
+            frameConsumeScheduledAt = 0L
         }
-        try { imageReader?.setOnImageAvailableListener(null, null) } catch (e: Exception) { }
-        try { virtualDisplay?.release() } catch (e: Exception) { }
+        runCatching { imageReader?.setOnImageAvailableListener(null, null) }
+        val display = retainedPausedVirtualDisplay ?: virtualDisplay
+        runCatching { display?.setSurface(null) }
+        runCatching { display?.release() }
+        retainedPausedVirtualDisplay = null
         virtualDisplay = null
-        try { imageReader?.close() } catch (e: Exception) { }
+        capturePipelineActive = false
+        runCatching { imageReader?.close() }
         imageReader = null
-        try { mediaProjection?.stop() } catch (e: Exception) { }
+        runCatching {
+            mediaProjection?.let { projection ->
+                mediaProjectionCallback?.let(projection::unregisterCallback)
+                projection.stop()
+            }
+        }
+        mediaProjectionCallback = null
         mediaProjection = null
-        stopForeground(STOP_FOREGROUND_REMOVE)
+        // 只有完整关闭才结束前台服务。暂停仍需保留无障碍监听和恢复入口。
+        if (!preparedSession || stopping || overlayClosed) {
+            stopForeground(STOP_FOREGROUND_REMOVE)
+        }
+    }
+
+    /** 撤销前台通知与 setStatus 补投递的同一通知；关闭悬浮窗后通知栏不应再留任何条目。 */
+    private fun cancelForegroundNotification() {
+        runCatching {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.cancel(NOTIF_ID)
+        }
     }
 
     private fun OverlayPanelView.dp(v: Int): Int =

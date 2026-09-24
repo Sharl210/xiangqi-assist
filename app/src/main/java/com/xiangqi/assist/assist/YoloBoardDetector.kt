@@ -118,7 +118,11 @@ class YoloBoardDetector(context: Context) {
         exclude: IntArray?,
     ): DetectionBoardMapper.MappedBoard? {
         val cx0: Int; val cy0: Int; val cw: Int; val ch: Int
-        if (cropHint != null && cropHint[2] - cropHint[0] >= 64 && cropHint[3] - cropHint[1] >= 64) {
+        if (cropHint != null &&
+            cropHint.size >= 4 &&
+            cropHint[2] > cropHint[0] &&
+            cropHint[3] > cropHint[1]
+        ) {
             cx0 = max(0, cropHint[0].toInt()); cy0 = max(0, cropHint[1].toInt())
             cw = min(frame.width, cropHint[2].toInt()) - cx0
             ch = min(frame.height, cropHint[3].toInt()) - cy0

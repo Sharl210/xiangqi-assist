@@ -56,6 +56,47 @@ class AssistConfig(context: Context) {
                 .commit()
         }
 
+    /**
+     * 用户框选过的棋盘识别范围（归一化 0..1）：x, y, width, height。
+     *
+     * - `null` 表示**从未框选**，识别、稳定帧与裁剪都按整屏进行；
+     * - 一旦保存，变化监听、稳定帧判定与棋盘识别都只在这个范围内进行，
+     *   范围之外的画面变化不再被当成棋盘变化。
+     */
+    var boardRegion: FloatArray?
+        get() {
+            if (!sp.getBoolean(KEY_BOARD_REGION_SET, false)) return null
+            val a = floatArrayOf(
+                sp.getFloat(KEY_BOARD_REGION_X, -1f),
+                sp.getFloat(KEY_BOARD_REGION_Y, -1f),
+                sp.getFloat(KEY_BOARD_REGION_W, -1f),
+                sp.getFloat(KEY_BOARD_REGION_H, -1f),
+            )
+            if (a[0] < 0f || a[1] < 0f || a[2] <= 0f || a[3] <= 0f) return null
+            if (a[0] + a[2] > 1f + EPS || a[1] + a[3] > 1f + EPS) return null
+            return a
+        }
+        set(value) {
+            if (value == null || value.size < 4) {
+                sp.edit().putBoolean(KEY_BOARD_REGION_SET, false).apply()
+                return
+            }
+            val w = value[2].coerceIn(BoardRegion.MIN_SIZE, 1f)
+            val h = value[3].coerceIn(BoardRegion.MIN_SIZE, 1f)
+            // 写盘前先夹取，避免把越界区域持久化后再被读成非法值。
+            sp.edit()
+                .putBoolean(KEY_BOARD_REGION_SET, true)
+                .putFloat(KEY_BOARD_REGION_X, value[0].coerceIn(0f, 1f - w))
+                .putFloat(KEY_BOARD_REGION_Y, value[1].coerceIn(0f, 1f - h))
+                .putFloat(KEY_BOARD_REGION_W, w)
+                .putFloat(KEY_BOARD_REGION_H, h)
+                .apply()
+        }
+
+    /** 是否已经框选过识别范围（悬浮窗按钮据此显示绿色）。 */
+    val boardRegionConfigured: Boolean
+        get() = boardRegion != null
+
     /** 悬浮窗是否处于"缩成小球"状态 */
     var overlayCollapsed: Boolean
         get() = sp.getBoolean(KEY_COLLAPSED, false)
@@ -69,7 +110,7 @@ class AssistConfig(context: Context) {
         get() = sp.getInt(KEY_WORK_MODE, DEFAULT_WORK_MODE).coerceIn(MODE_GUIDE, MODE_AUTO)
         set(value) { sp.edit().putInt(KEY_WORK_MODE, value.coerceIn(MODE_GUIDE, MODE_AUTO)).apply() }
 
-    /** 旧设置字段仅为兼容；生产录屏采样固定为4帧/秒，不能再按档位改变采样频率。 */
+    /** 旧设置字段仅为兼容；生产录屏采样固定为8帧/秒，不能再按档位改变采样频率。 */
     var captureThrottleMs: Int
         get() = sp.getInt(KEY_THROTTLE, 400).coerceIn(0, 10000)
         set(value) { sp.edit().putInt(KEY_THROTTLE, value.coerceIn(0, 10000)).apply() }
@@ -231,6 +272,14 @@ class AssistConfig(context: Context) {
         private const val KEY_RECT_Y = "overlay_rect_y"
         private const val KEY_RECT_W = "overlay_rect_w"
         private const val KEY_RECT_H = "overlay_rect_h"
+        /** 用户框选的棋盘识别范围（归一化 x/y/w/h）；未设置表示从未框选、按整屏识别。 */
+        private const val KEY_BOARD_REGION_SET = "board_region_set"
+        private const val KEY_BOARD_REGION_X = "board_region_x"
+        private const val KEY_BOARD_REGION_Y = "board_region_y"
+        private const val KEY_BOARD_REGION_W = "board_region_w"
+        private const val KEY_BOARD_REGION_H = "board_region_h"
+        /** 归一化坐标比较的容差，吸收浮点误差，避免"刚好贴边"被误判为非法。 */
+        private const val EPS = 1e-4f
         private const val KEY_COLLAPSED = "overlay_collapsed"
         private const val KEY_WORK_MODE = "work_mode"
         private const val KEY_THROTTLE = "capture_throttle_ms"

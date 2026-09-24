@@ -97,7 +97,7 @@ class MainActivity : AppCompatActivity() {
         val text = "象棋辅助 XiangqiAssist v${BuildConfig.VERSION_NAME}\n\n" +
             "特色功能：\n" +
             "· 本地 Pikafish 对弈、局面分析、打谱与复盘；\n" +
-            "· 悬浮窗辅助：八帧稳定识别、候选着法、评分与主变；\n" +
+            "· 悬浮窗辅助：四帧稳定识别、候选着法、评分与主变；\n" +
             "· 可选无障碍自动落子，支持点击式或拖动式手势。\n\n" +
             DISCLAIMER + "\n\n" +
             CREDITS

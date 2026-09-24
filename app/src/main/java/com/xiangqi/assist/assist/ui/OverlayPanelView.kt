@@ -65,6 +65,10 @@ class OverlayModel(
     val manualMode: Boolean = false,
     /** 手动模式下当前选中的格（canonical x,y），迷你棋盘绘制高亮 */
     val selectedCell: Pair<Int, Int>? = null,
+    /** 已保存过用户框选范围；按钮会显示绿色，下一次打开直接恢复该区域。 */
+    val boardRegionConfigured: Boolean = false,
+    /** “下一手变招”意图尚未执行时保持绿色；实际非默认着法执行后恢复白色。 */
+    val nextVariationPending: Boolean = false,
     /** 当前阶段的外圈颜色（只画边框圆环，不动整体配色） */
     val ringColor: Int = AssistHud.RING_IDLE,
 )
@@ -80,7 +84,7 @@ enum class OverlayAction {
     TOGGLE_SIM,
     /** 候选数量档位 */
     CYCLE_CANDIDATE_COUNT,
-    /** 切换当前已计算候选着法 */
+    /** 预存下一次我方实际落子的非默认候选；可以在对方回合或尚无候选时点击。 */
     CYCLE_CANDIDATE,
     /** 悔棋：回退到上一个已确认局面 */
     UNDO,
@@ -98,6 +102,8 @@ enum class OverlayAction {
     CYCLE_STRENGTH,
     /** 引擎 Hash 档位循环 */
     CYCLE_HASH,
+    /** 框选棋盘识别范围 */
+    EDIT_BOARD_REGION,
     /** 缩小为悬浮球 */
     COLLAPSE,
     /** 关闭连线 */
@@ -122,6 +128,8 @@ class OverlayPanelView @JvmOverloads constructor(
     private val btnStrength: TextView
     private val btnCandidateCount: TextView
     private val btnHash: TextView
+    private val btnChange: TextView
+    private val btnBoardRegion: TextView
     private val btnStop: TextView
     private val btnRun: TextView
     private val btnClose: TextView
@@ -134,7 +142,7 @@ class OverlayPanelView @JvmOverloads constructor(
 
     // 关闭二次确认：误触风险大
     private var closeArmed = false
-    private val normalColor: Int
+    private val normalColor: Int = Color.WHITE
     private val closeReset = Runnable { resetCloseState() }
 
     private fun resetCloseState() {
@@ -206,16 +214,16 @@ class OverlayPanelView @JvmOverloads constructor(
         btnStrength = findViewById(R.id.overlay_btn_strength)
         btnCandidateCount = findViewById(R.id.overlay_btn_candidate_count)
         btnHash = findViewById(R.id.overlay_btn_hash)
+        btnChange = findViewById(R.id.overlay_btn_change)
+        btnBoardRegion = findViewById(R.id.overlay_btn_board_region)
         btnStop = findViewById(R.id.overlay_btn_stop)
         btnRun = findViewById(R.id.overlay_btn_run)
         btnClose = findViewById(R.id.overlay_btn_close)
-        normalColor = btnClose.currentTextColor
-
         btnMySide.setOnClickListener { onAction?.invoke(OverlayAction.TOGGLE_MY_SIDE) }
         btnMode.setOnClickListener { onAction?.invoke(OverlayAction.CYCLE_MODE) }
         btnAutoPlay.setOnClickListener { onAction?.invoke(OverlayAction.TOGGLE_AUTO) }
         btnSim.setOnClickListener { onAction?.invoke(OverlayAction.TOGGLE_SIM) }
-        findViewById<TextView>(R.id.overlay_btn_change).setOnClickListener { onAction?.invoke(OverlayAction.CYCLE_CANDIDATE) }
+        btnChange.setOnClickListener { onAction?.invoke(OverlayAction.CYCLE_CANDIDATE) }
         findViewById<TextView>(R.id.overlay_btn_undo).setOnClickListener { onAction?.invoke(OverlayAction.UNDO) }
         findViewById<TextView>(R.id.overlay_btn_refresh).setOnClickListener { onAction?.invoke(OverlayAction.REFRESH_BOARD) }
         btnRun.setOnClickListener { onAction?.invoke(OverlayAction.TOGGLE_RUN) }
@@ -228,6 +236,7 @@ class OverlayPanelView @JvmOverloads constructor(
         }
         btnCandidateCount.setOnClickListener { onAction?.invoke(OverlayAction.CYCLE_CANDIDATE_COUNT) }
         btnHash.setOnClickListener { onAction?.invoke(OverlayAction.CYCLE_HASH) }
+        btnBoardRegion.setOnClickListener { onAction?.invoke(OverlayAction.EDIT_BOARD_REGION) }
         findViewById<TextView>(R.id.overlay_btn_collapse).setOnClickListener { onAction?.invoke(OverlayAction.COLLAPSE) }
         btnClose.setOnClickListener {
             if (!closeArmed) {
@@ -249,7 +258,7 @@ class OverlayPanelView @JvmOverloads constructor(
         get() = buttonBar.allButtons() + listOf(btnClose, findViewById(R.id.overlay_btn_collapse))
 
     fun render(model: OverlayModel) {
-        // 注意：不要在这里把状态区滚回顶部——文字几乎每帧都在变，回顶会让你没法往下滚
+        // Keep the display-only button accent explicit so rapid status renders cannot clear it.
         status.text = model.statusText
         title.text = model.stageText
         if (model.winRateText.isEmpty()) {
@@ -284,6 +293,8 @@ class OverlayPanelView @JvmOverloads constructor(
         btnStrength.text = model.strengthText
         btnCandidateCount.text = model.candidateCountText
         btnHash.text = model.hashText
+        btnChange.setTextColor(if (model.nextVariationPending) ON_COLOR else normalColor)
+        btnBoardRegion.setTextColor(if (model.boardRegionConfigured) ON_COLOR else normalColor)
         chess.pieces = model.pieces
         chess.arrowFrom = model.arrowFrom
         chess.arrowTo = model.arrowTo

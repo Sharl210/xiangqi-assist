@@ -27,6 +27,7 @@ import com.xiangqi.assist.R
 import com.xiangqi.assist.UiChrome
 import com.xiangqi.assist.views.WebviewActivity
 import com.xiangqi.assist.assist.AssistConfig
+import com.xiangqi.assist.assist.AssistRunControlPolicy
 import com.xiangqi.assist.assist.EngineTuningPolicy
 import com.xiangqi.assist.assist.ScreenAssistService
 import com.xiangqi.assist.assist.access.AssistAccessibilityService
@@ -47,11 +48,13 @@ class AssistActivity : AppCompatActivity() {
     private var preparationPending = false
     private var preparationRootAttempted = false
     private var preparationRootInFlight = false
+    /** 暂停后系统录屏授权页是否已经发起，避免 onResume/轮询重复弹出。 */
+    private var resumeAuthorizationLaunched = false
+    private var resumeAuthorizationRequested = false
 
     private lateinit var btnOverlay: Button
     private lateinit var btnNotify: Button
     private lateinit var btnStartCapture: Button
-    private lateinit var btnRunControl: Button
     private lateinit var btnAssistHelp: Button
     private lateinit var btnAccessibility: Button
     private lateinit var btnRootEnable: Button
@@ -66,6 +69,7 @@ class AssistActivity : AppCompatActivity() {
     private val statusHandler = Handler(Looper.getMainLooper())
     private val statusRunnable = object : Runnable {
         override fun run() {
+            service?.reconcileAccessibilityShutdown()
             refreshStatus()
             statusHandler.postDelayed(this, 1000)
         }
@@ -83,6 +87,8 @@ class AssistActivity : AppCompatActivity() {
             service = cb?.service()
             bound = true
             refreshStatus()
+            service?.reconcileAccessibilityShutdown()
+            maybeLaunchResumeAuthorization()
         }
 
         override fun onServiceDisconnected(name: ComponentName?) {
@@ -94,15 +100,29 @@ class AssistActivity : AppCompatActivity() {
     private val projectionLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
+        val resuming = resumeAuthorizationLaunched
+        resumeAuthorizationLaunched = false
         if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            if (resuming) {
+                service?.acceptCaptureGrant(result.resultCode, result.data)
+                preparationPending = false
+                Toast.makeText(this, "录屏权限已恢复；回到原棋盘应用后继续识别", Toast.LENGTH_LONG).show()
+                finish()
+                return@registerForActivityResult
+            }
             captureIntentCode = result.resultCode
             captureIntentData = result.data
-            startCaptureService()
+            startCaptureService(resumeCapture = false)
             preparationPending = false
-            Toast.makeText(this, "准备完成，当前保持停止；点击“一键启动”后开始识别", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, "准备完成，当前保持暂停；打开悬浮窗并点击开始后才会识别", Toast.LENGTH_LONG).show()
         } else {
             preparationPending = false
-            Toast.makeText(this, "未授予录屏权限，无法识别", Toast.LENGTH_SHORT).show()
+            if (resuming) service?.rejectCaptureGrant()
+            Toast.makeText(
+                this,
+                if (resuming) "未恢复录屏权限，仍保持暂停" else "未授予录屏权限，无法识别",
+                Toast.LENGTH_SHORT,
+            ).show()
         }
     }
 
@@ -128,7 +148,6 @@ class AssistActivity : AppCompatActivity() {
         btnOverlay = findViewById(R.id.btn_overlay_permission)
         btnNotify = findViewById(R.id.btn_notification_permission)
         btnStartCapture = findViewById(R.id.btn_start_capture)
-        btnRunControl = findViewById(R.id.btn_run_control)
         btnAssistHelp = findViewById(R.id.btn_assist_help)
         btnAccessibility = findViewById(R.id.btn_accessibility)
         btnRootEnable = findViewById(R.id.btn_root_enable)
@@ -162,12 +181,7 @@ class AssistActivity : AppCompatActivity() {
                 notificationLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
             }
         }
-        btnStartCapture.setOnClickListener {
-            preparationPending = true
-            preparationRootAttempted = false
-            continueEnvironmentPreparation()
-        }
-        btnRunControl.setOnClickListener { toggleRunFromApp() }
+        btnStartCapture.setOnClickListener { onPrimaryButton() }
         btnAssistHelp.setOnClickListener {
             startActivity(Intent(this, WebviewActivity::class.java).apply {
                 putExtra("url", "file:///android_asset/help.html#assist")
@@ -189,6 +203,7 @@ class AssistActivity : AppCompatActivity() {
         btnEngineThreads.setOnClickListener { cycleEngineThreads() }
 
         bindService(Intent(this, ScreenAssistService::class.java), connection, Context.BIND_AUTO_CREATE)
+        handleIncomingIntent(intent)
 
         // root 探测放到后台：su 首次调用可能阻塞一两秒
         Thread {
@@ -203,10 +218,35 @@ class AssistActivity : AppCompatActivity() {
 
     override fun onResume() {
         super.onResume()
+        service?.reconcileAccessibilityShutdown()
         refreshStatus()
         service?.refreshAutoAvailability()
+        maybeLaunchResumeAuthorization()
         statusHandler.removeCallbacks(statusRunnable)
         statusHandler.postDelayed(statusRunnable, 1000)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        handleIncomingIntent(intent)
+    }
+
+    private fun handleIncomingIntent(intent: Intent?) {
+        if (intent?.getBooleanExtra(ScreenAssistService.EXTRA_REQUEST_CAPTURE_RESUME, false) == true) {
+            resumeAuthorizationRequested = true
+            intent.removeExtra(ScreenAssistService.EXTRA_REQUEST_CAPTURE_RESUME)
+            maybeLaunchResumeAuthorization()
+        }
+    }
+
+    private fun maybeLaunchResumeAuthorization() {
+        val svc = service ?: return
+        if (!svc.isPrepared() || !svc.isCaptureResumePending() || resumeAuthorizationLaunched) return
+        resumeAuthorizationRequested = true
+        resumeAuthorizationLaunched = true
+        val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        projectionLauncher.launch(mpm.createScreenCaptureIntent())
     }
 
     override fun onPause() {
@@ -221,11 +261,14 @@ class AssistActivity : AppCompatActivity() {
     }
 
     /**
-     * 单一操作入口：按顺序补齐悬浮窗、通知、自动走子通道和录屏环境。
-     * 每次只发起一个系统交互；返回本页后继续下一项，已有环境则直接恢复服务运行。
+     * 每次只发起一个系统交互；返回本页后继续下一项。投影准备成功后会建立已暂停会话，
+     * 不在此流程自动开始识别；用户仍需在悬浮窗里明确点“开始”。
      */
     private fun continueEnvironmentPreparation() {
         if (!preparationPending || isFinishing || isDestroyed) return
+        val runningService = service
+
+        if (service?.isAccessibilityShutdownPending() == true) return
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, "先授予悬浮窗权限，返回后会继续准备", Toast.LENGTH_LONG).show()
             overlayLauncher.launch(
@@ -276,40 +319,70 @@ class AssistActivity : AppCompatActivity() {
             // 已在设置中启用但实例尚未连接：允许先启动识别；服务会继续自愈通道。
         }
 
-        val runningService = service
-        if (runningService?.isCapturing() == true) {
+        if (runningService?.hasPreparedIntent() == true || runningService?.isAccessibilityShutdownPending() == true) {
+
             preparationPending = false
-            Toast.makeText(this, "运行环境已准备完成；当前状态由“一键启动/关闭”控制", Toast.LENGTH_SHORT).show()
+            Toast.makeText(
+                this,
+                "上一会话仍在关闭/等待系统核验；核验完成并显示一键准备后才能重新准备",
+                Toast.LENGTH_LONG,
+            ).show()
+            refreshStatus()
+            return
+        }
+        if (runningService?.isPrepared() == true && runningService.isProjectionAuthorized()) {
+            preparationPending = false
+            Toast.makeText(
+                this,
+                if (runningService.isCapturing()) "运行环境已准备且正在识别"
+                else if (runningService.isCaptureResumePending()) "运行环境仍已准备；继续时需要重新确认屏幕录制权限"
+                else "准备完成，当前保持暂停；打开悬浮窗并点击开始，无需重新授权",
+                Toast.LENGTH_SHORT,
+            ).show()
             refreshStatus()
             return
         }
         val mpm = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+        resumeAuthorizationLaunched = false
         projectionLauncher.launch(mpm.createScreenCaptureIntent())
     }
 
-    private fun startCaptureService() {
+    private fun startCaptureService(resumeCapture: Boolean = false) {
         if (captureIntentData == null) return
         val intent = Intent(this, ScreenAssistService::class.java)
             .setAction(ScreenAssistService.ACTION_START)
             .putExtra(ScreenAssistService.EXTRA_RESULT_CODE, captureIntentCode)
             .putExtra(ScreenAssistService.EXTRA_RESULT_DATA, captureIntentData)
+            .putExtra(ScreenAssistService.EXTRA_RESUME_CAPTURE, resumeCapture)
         ContextCompat.startForegroundService(this, intent)
     }
 
-    private fun toggleRunFromApp() {
+    /**
+     * One-button control: an unprepared session runs environment setup and remains paused;
+     * the floating window's Start button is the explicit action that begins capture/analysis.
+     * Once prepared, this button closes the whole session whether it is running or paused.
+     */
+    private fun onPrimaryButton() {
         val svc = service
-        if (svc == null || !svc.isCapturing()) {
-            Toast.makeText(this, "请先点击“一键准备”完成悬浮窗、通知和录屏环境", Toast.LENGTH_LONG).show()
+        if (svc?.isAccessibilityShutdownPending() == true) {
+            Toast.makeText(this, "正在关闭屏幕操作通道，请稍候", Toast.LENGTH_SHORT).show()
             return
         }
-        if (svc.isRunning()) {
-            svc.requestStopFromControlEntry()
-            Toast.makeText(this, "已关闭识别与计算，录屏环境保留", Toast.LENGTH_SHORT).show()
-        } else {
-            svc.requestStartFromControlEntry()
-            Toast.makeText(this, "已开始，切换到棋盘后将等待八帧稳定", Toast.LENGTH_SHORT).show()
+        val preparedIntent = svc?.hasPreparedIntent() == true
+        val prepared = svc?.isPrepared() == true
+        if (!preparedIntent && !prepared) {
+            preparationPending = true
+            preparationRootAttempted = false
+            continueEnvironmentPreparation()
+            return
         }
-        statusHandler.postDelayed({ refreshStatus() }, 120L)
+        svc?.requestStopFromControlEntry()
+        Toast.makeText(this, "正在关闭识别、屏幕共享、悬浮窗和本应用屏幕操作通道", Toast.LENGTH_SHORT).show()
+        statusHandler.postDelayed({ refreshStatus() }, 150L)
+    }
+
+    private fun toggleRunFromApp() {
+        onPrimaryButton()
     }
 
     private fun enableViaRoot() {
@@ -408,22 +481,18 @@ class AssistActivity : AppCompatActivity() {
         btnNotify.isEnabled = !notifOk && Build.VERSION.SDK_INT >= 33
 
         val svc = service
-        val prepared = svc?.isCapturing() == true
-        val running = svc?.isRunning() == true
-        btnStartCapture.text = if (prepared) "一键准备：环境已就绪 ✓" else "一键准备"
-        btnRunControl.isEnabled = prepared
-        btnRunControl.text = if (running) "一键关闭" else "一键启动"
-        btnRunControl.backgroundTintList = ColorStateList.valueOf(
+        val prepared = svc?.isPrepared() == true
+        val preparedIntent = prepared || svc?.hasPreparedIntent() == true
+        val running = prepared && svc?.isRunning() == true
+        btnStartCapture.text = AssistRunControlPolicy.primaryLabel(preparedIntent, running)
+        btnStartCapture.isEnabled = svc?.isAccessibilityShutdownPending() != true
+        btnStartCapture.backgroundTintList = ColorStateList.valueOf(
             ContextCompat.getColor(
                 this,
-                when {
-                    !prepared -> R.color.brand_navy_700
-                    running -> R.color.brand_red_600
-                    else -> R.color.brand_green_600
-                }
+                if (AssistRunControlPolicy.primaryButtonIsClose(preparedIntent))
+                    R.color.brand_red_600 else R.color.brand_gold_500
             )
         )
-        btnRunControl.setTextColor(ContextCompat.getColor(this, R.color.white))
 
         val accessEnabled = AssistAccessibilityService.isEnabledInSettings(this)
         val accessConnected = AssistAccessibilityService.isConnected()
@@ -471,14 +540,24 @@ class AssistActivity : AppCompatActivity() {
         tvAutoHint.text = when {
             !accessConnected && !accessEnabled -> "自动落子通道尚未开启"
             !accessConnected -> "操作通道已启用，正在等待系统连接"
-            !running -> "操作通道已就绪；辅助当前停止"
+            !prepared -> "操作通道已就绪；请先一键准备"
+            !running && svc?.isCaptureThrottled() == true ->
+                "已暂停；授权保留，屏幕画面未输出，点击继续恢复"
+            !running && svc?.isCaptureResumePending() == true ->
+                "已暂停；系统已结束屏幕共享，继续时需重新授权"
+            !running -> "操作通道已就绪；辅助当前暂停"
             autoOn -> "识别运行中；自动走子已开启"
             else -> "识别运行中；当前只显示建议"
         }
 
         tvStatus.text = when {
-            !prepared -> "当前已停止 · 尚未准备"
-            !running -> "当前已停止 · 环境已就绪"
+            !preparedIntent -> "当前已关闭 · 尚未准备"
+            !prepared && svc?.isAccessibilityShutdownPending() == true -> "正在关闭本应用的屏幕操作通道"
+            prepared && !running && svc?.isCaptureThrottled() == true ->
+                "已暂停 · 授权保留 · 屏幕画面未输出 · 无障碍仍在监听"
+            prepared && !running && svc?.isCaptureResumePending() == true ->
+                "已暂停 · 系统已结束屏幕共享 · 继续时需重新授权"
+            !running -> "当前已暂停 · 无障碍监听保持开启"
             else -> "运行中 · ${svc?.getStatusText().orEmpty()}"
         }
     }

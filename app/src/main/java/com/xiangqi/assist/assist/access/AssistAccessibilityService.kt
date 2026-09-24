@@ -97,6 +97,11 @@ class AssistAccessibilityService : AccessibilityService() {
         emitCurrentForegroundWindow()
     }
 
+    /** 关闭悬浮窗时只停用本应用这个无障碍组件，不触及系统的其它服务。 */
+    fun disableSelfForSessionClose() {
+        disableSelf()
+    }
+
     private fun isFullScreenBounds(bounds: Rect, screenW: Int, screenH: Int): Boolean {
         if (screenW <= 0 || screenH <= 0 || bounds.width() <= 0 || bounds.height() <= 0) return false
         val screenArea = screenW.toLong() * screenH.toLong()
@@ -122,6 +127,10 @@ class AssistAccessibilityService : AccessibilityService() {
         val path = Path().apply { moveTo(x, y) }
         return dispatchPath(path, 0L, TAP_DURATION_MS, onFinished)
     }
+
+    /** 起点选中会改变目标棋盘选择状态；使用一次短点按，不用长按代替选择。 */
+    fun previewSelectOrigin(x: Float, y: Float, onFinished: ((Boolean) -> Unit)?): Boolean =
+        tap(x, y, onFinished)
 
     /** 长按并在系统真正完成/取消手势时回报。 */
     fun pressAndHold(x: Float, y: Float, durationMs: Long = HOLD_DURATION_MS): Boolean =

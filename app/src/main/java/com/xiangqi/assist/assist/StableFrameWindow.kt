@@ -6,9 +6,9 @@ import java.util.ArrayDeque
  * 录屏样本的连续滑动稳定窗口（纯 JVM）。
  *
  * 每个样本只比较低分辨率图像签名；窗口始终只保留最近的八个样本。
- * 因此当前八个样本不稳定时，下一次只需等一个新的 250ms 样本，丢掉最旧样本后
+ * 因此当前八个样本不稳定时，下一次只需等一个新的 125ms 样本，丢掉最旧样本后
  * 再检查后面的八个，而不是重新等待八个样本。窗口稳定后只释放一次；画面再次变化
- * 或调用方要求重试时才重新释放，避免静止画面每 250ms 重复跑模型。
+ * 或调用方要求重试时才重新释放，避免静止画面每 125ms 重复跑模型。
  */
 class StableFrameWindow(
     private val requiredStableFrames: Int = FrameStabilityPolicy.REQUIRED_STABLE_FRAMES,
@@ -39,7 +39,12 @@ class StableFrameWindow(
     }
 
     @Synchronized
-    fun accept(frame: Frame, frameEpoch: Long, now: Long): Result {
+    fun accept(
+        frame: Frame,
+        frameEpoch: Long,
+        now: Long,
+        signatureRegion: DoubleArray? = null,
+    ): Result {
         val epochChanged = epoch != frameEpoch
         val gapTooLong = lastAcceptedAt != Long.MIN_VALUE && now - lastAcceptedAt > timeoutMs
         if (epochChanged || gapTooLong) {
@@ -48,7 +53,8 @@ class StableFrameWindow(
         }
         if (epoch == null) epoch = frameEpoch
 
-        val signature = FrameStabilityPolicy.signature(frame)
+        // 用户框选过识别范围时，签名只覆盖该区域；框外变化不推动稳定窗口。
+        val signature = FrameStabilityPolicy.signature(frame, region = signatureRegion)
         val previous = samples.peekLast()
         val changed = previous != null && !FrameStabilityPolicy.isStable(previous.signature, signature)
         samples.addLast(Sample(frame, signature))
@@ -74,7 +80,7 @@ class StableFrameWindow(
 
     /**
      * 模型未能得到可用棋面或结构校验拒绝当前关键帧时调用。
-     * 保留最近八帧，让下一个 250ms 样本立即重新尝试，而不是重新等待八帧。
+     * 保留最近八帧，让下一个125ms样本立即重新尝试，而不是重新等待八帧。
      */
     @Synchronized
     fun rearm() {

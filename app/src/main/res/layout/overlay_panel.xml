@@ -22,12 +22,13 @@
         <TextView android:id="@+id/overlay_btn_autoplay" style="@style/OverlayButton" android:gravity="center" android:text="自动走子" />
         <TextView android:id="@+id/overlay_btn_refresh" style="@style/OverlayButton" android:gravity="center" android:text="更新棋谱" />
         <TextView android:id="@+id/overlay_btn_turn" style="@style/OverlayButton" android:gravity="center" android:text="换走棋方" />
-        <TextView android:id="@+id/overlay_btn_sim" style="@style/OverlayButton" android:gravity="center" android:text="仿真" />
+        <TextView android:id="@+id/overlay_btn_stop" style="@style/OverlayButton" android:gravity="center" android:text="重置" />
         <TextView android:id="@+id/overlay_btn_change" style="@style/OverlayButton" android:gravity="center" android:text="变招" />
         <TextView android:id="@+id/overlay_btn_undo" style="@style/OverlayButton" android:gravity="center" android:text="悔棋" />
-        <TextView android:id="@+id/overlay_btn_stop" style="@style/OverlayButton" android:gravity="center" android:text="重置" />
+        <TextView android:id="@+id/overlay_btn_sim" style="@style/OverlayButton" android:gravity="center" android:text="仿真" />
         <TextView android:id="@+id/overlay_btn_strength" style="@style/OverlayButton" android:gravity="center" android:text="深度20" android:contentDescription="短按切换当前模式档位，长按在深度、总时、每候选时间之间切换" />
         <TextView android:id="@+id/overlay_btn_candidate_count" style="@style/OverlayButton" android:gravity="center" android:text="候选1" android:contentDescription="候选数量1到6，点击切换" />
         <TextView android:id="@+id/overlay_btn_hash" style="@style/OverlayButton" android:gravity="center" android:text="Hash512" />
+        <TextView android:id="@+id/overlay_btn_board_region" style="@style/OverlayButton" android:gravity="center" android:text="框选棋盘范围" android:contentDescription="框选棋盘识别范围，只在该区域内监听画面变化" />
     </com.xiangqi.assist.assist.ui.OverlayButtonBar>
 </LinearLayout>

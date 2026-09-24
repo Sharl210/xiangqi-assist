@@ -4,8 +4,8 @@ package com.xiangqi.assist.assist
  * 蓝色候选箭头的“起点预选”、以及绿色最终箭头的落子方式（纯 JVM，可单测）。
  *
  * 产品行为：
- * - 引擎每输出一条新的候选主变（蓝色箭头），就**异步按住**该着法的起点一次，
- *   让棋盘出现“把棋子拿起来”的动效，更像真人思考；
+ * - 引擎每输出一条新的候选主变（蓝色箭头），就异步点按该着法的起点一次，
+ *   让棋盘进入选中状态；
  * - 当最终结果确定（绿色箭头），若起点已经被正确预选并且手势已经完成，
  *   就只补一下终点，避免再点一次起点把选中取消；
  * - 否则回退到完整的“起点 → 终点”手势。
@@ -18,6 +18,33 @@ package com.xiangqi.assist.assist
  * 5. 预选手势尚未完成时，最终落子先等它结束，绝不叠加两个手势。
  */
 object CandidatePreviewPolicy {
+
+    /**
+     * 起点点击切换到另一个预选目标时，两次点击之间的随机间隔范围。
+     * 首次预选没有前一点击，不等待；每次实际派发后抽取下一次切换的间隔。
+     */
+    const val MIN_PREVIEW_SWITCH_GAP_MS = 750L
+    const val MAX_PREVIEW_SWITCH_GAP_MS = 1_250L
+
+    fun randomizedPreviewSwitchGapMs(random: java.util.Random): Long {
+        val choices = (MAX_PREVIEW_SWITCH_GAP_MS - MIN_PREVIEW_SWITCH_GAP_MS + 1L).toInt()
+        return MIN_PREVIEW_SWITCH_GAP_MS + random.nextInt(choices).toLong()
+    }
+
+    /**
+     * 距上一次真正派发选中点击是否已满足该次抽取的切换间隔。
+     * @param lastDispatchAt 上次派发时刻；Long.MIN_VALUE 表示还没有前一点击。
+     * @param requiredGapMs 上一次派发后抽取的 750–1250ms 间隔。
+     */
+    fun gapSatisfied(
+        now: Long,
+        lastDispatchAt: Long,
+        requiredGapMs: Long = MIN_PREVIEW_SWITCH_GAP_MS,
+    ): Boolean = lastDispatchAt == Long.MIN_VALUE ||
+        now - lastDispatchAt >= requiredGapMs.coerceIn(
+            MIN_PREVIEW_SWITCH_GAP_MS,
+            MAX_PREVIEW_SWITCH_GAP_MS,
+        )
 
     enum class PreviewDecision {
         /** 不产生任何触摸动作 */
@@ -76,12 +103,10 @@ object CandidatePreviewPolicy {
         if (!input.originPointValid) return PreviewDecision.NO_OP
         val sameContext = input.selectedFen == input.currentFen &&
             input.selectedAnalysisId == input.analysisId
-        if (sameContext && input.selectedOrigin != null &&
-            (input.selectionAttempted || input.selectedOrigin != null)) {
-            // 一次分析会话只预选一次。迭代加深时 PV 可能改变起点，但那不是用户选择了
-            // 新候选；继续换点会在棋盘上反复选不同棋子。若最终起点不同，正式落子流程
-            // 会清理旧预选并回退完整起点→终点。
-            return PreviewDecision.ALREADY_SELECTED
+        if (sameContext && input.selectedOrigin != null) {
+            // 同一预选起点不重复点；候选切换到另一枚棋子时允许发起选中目标切换，
+            // 两次实际点击的随机间隔由服务层限流。
+            if (input.selectedOrigin == originOf(ucci)) return PreviewDecision.ALREADY_SELECTED
         }
         return PreviewDecision.DISPATCH_ORIGIN_PREVIEW
     }
@@ -100,6 +125,19 @@ object CandidatePreviewPolicy {
             FinalDecision.WAIT_SELECTION
         }
     }
+
+    /** 只有匹配的已完成预选、仍是原无障碍实例且存在快照时，才可只点终点。 */
+    fun shouldReuseSelectedOrigin(
+        decision: FinalDecision,
+        requireAutoSwitch: Boolean,
+        snapshotMatches: Boolean,
+        sameAccessibilityInstance: Boolean,
+    ): Boolean = requireAutoSwitch &&
+        decision == FinalDecision.REUSE_SELECTED_ORIGIN &&
+        snapshotMatches &&
+        sameAccessibilityInstance
+
+
 }
 
 /**
@@ -157,7 +195,7 @@ class CandidatePreviewState {
         requestToken++
     }
 
-    fun snapshot(): Snapshot = Snapshot(fen, analysisId, origin, gestureCompleted, selectionAttempted)
+    fun snapshot(): Snapshot = Snapshot(fen, analysisId, origin, gestureCompleted, selectionAttempted, requestToken)
 
     data class Snapshot(
         val fen: String,
@@ -165,5 +203,6 @@ class CandidatePreviewState {
         val origin: String?,
         val gestureCompleted: Boolean,
         val selectionAttempted: Boolean,
+        val requestToken: Long,
     )
 }

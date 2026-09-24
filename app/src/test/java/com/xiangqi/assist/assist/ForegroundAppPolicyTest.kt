@@ -20,6 +20,14 @@ class ForegroundAppPolicyTest {
     }
 
     @Test
+    fun `authorized return from owner control page reports the original target change`() {
+        assertEquals(
+            ForegroundAppPolicy.Decision.CHANGED(owner, "com.game"),
+            ForegroundAppPolicy.observe(owner, owner, "com.game", true),
+        )
+    }
+
+    @Test
     fun `owner package is a real return target after leaving the game`() {
         // 真实日志回归：离开 cn.jj.chess.nearme.gamecenter 进入本应用时，
         // 应记录切出并暂停；随后再次看到游戏包名才能恢复。

@@ -70,18 +70,30 @@ class CandidatePreviewPolicyTest {
     fun `the same candidate origin is never clicked twice`() {
         assertEquals(
             PreviewDecision.ALREADY_SELECTED,
-            preview(selectedFen = "FEN1", selectedAnalysisId = 7L, selectedOrigin = "b2"),
+            preview(selectedFen = "FEN1", selectedAnalysisId = 7L, selectedOrigin = "h2"),
         )
         assertEquals(
             PreviewDecision.ALREADY_SELECTED,
-            preview(selectedFen = "FEN1", selectedAnalysisId = 7L, selectedOrigin = "h2"),
+            preview(ucci = "h2h6", selectedFen = "FEN1", selectedAnalysisId = 7L, selectedOrigin = "h2"),
         )
     }
 
     @Test
-    fun `a different tentative pv origin in the same analysis is not previewed again`() {
+    fun `different candidate origin can be selected after the randomized gap`() {
+        assertEquals(
+            PreviewDecision.DISPATCH_ORIGIN_PREVIEW,
+            preview(ucci = "b2c2", selectedFen = "FEN1", selectedAnalysisId = 7L, selectedOrigin = "h2"),
+        )
         assertEquals(
             PreviewDecision.ALREADY_SELECTED,
+            preview(ucci = "h2e2", selectedFen = "FEN1", selectedAnalysisId = 7L, selectedOrigin = "h2"),
+        )
+    }
+
+    @Test
+    fun `a different tentative pv origin can be previewed after the randomized timing gate`() {
+        assertEquals(
+            PreviewDecision.DISPATCH_ORIGIN_PREVIEW,
             preview(ucci = "b2c2", selectedFen = "FEN1", selectedAnalysisId = 7L, selectedOrigin = "h2"),
         )
     }
@@ -156,6 +168,75 @@ class CandidatePreviewPolicyTest {
         st.onContext("FEN2", 8L)
         assertNull(st.origin)
         assertFalse(st.gestureCompleted)
+    }
+
+    @Test
+    fun `preview target switching gap is randomized inclusively from 750 to 1250 ms`() {
+        val minimum = object : java.util.Random(1L) {
+            override fun nextInt(bound: Int): Int = 0
+        }
+        val maximum = object : java.util.Random(1L) {
+            override fun nextInt(bound: Int): Int = bound - 1
+        }
+        assertEquals(750L, CandidatePreviewPolicy.randomizedPreviewSwitchGapMs(minimum))
+        assertEquals(1_250L, CandidatePreviewPolicy.randomizedPreviewSwitchGapMs(maximum))
+
+        val random = java.util.Random(23L)
+        val values = (0 until 1_000).map {
+            CandidatePreviewPolicy.randomizedPreviewSwitchGapMs(random)
+        }
+        assertTrue(values.all { it in 750L..1_250L })
+        assertTrue(values.distinct().size > 1)
+    }
+
+    @Test
+    fun `the next selection click is gated by the previously randomized interval`() {
+        val lastClickAt = 10_000L
+        assertTrue(CandidatePreviewPolicy.gapSatisfied(0L, Long.MIN_VALUE))
+        assertFalse(CandidatePreviewPolicy.gapSatisfied(10_999L, lastClickAt, 1_000L))
+        assertTrue(CandidatePreviewPolicy.gapSatisfied(11_000L, lastClickAt, 1_000L))
+        assertFalse(CandidatePreviewPolicy.gapSatisfied(11_249L, lastClickAt, 1_250L))
+        assertTrue(CandidatePreviewPolicy.gapSatisfied(11_250L, lastClickAt, 1_250L))
+    }
+
+    @Test
+    fun `only automatic moves reuse a completed matching preselected origin`() {
+        assertTrue(CandidatePreviewPolicy.shouldReuseSelectedOrigin(
+            FinalDecision.REUSE_SELECTED_ORIGIN,
+            requireAutoSwitch = true,
+            snapshotMatches = true,
+            sameAccessibilityInstance = true,
+        ))
+        assertFalse(CandidatePreviewPolicy.shouldReuseSelectedOrigin(
+            FinalDecision.FULL_MOVE,
+            requireAutoSwitch = true,
+            snapshotMatches = true,
+            sameAccessibilityInstance = true,
+        ))
+        assertFalse(CandidatePreviewPolicy.shouldReuseSelectedOrigin(
+            FinalDecision.WAIT_SELECTION,
+            requireAutoSwitch = true,
+            snapshotMatches = true,
+            sameAccessibilityInstance = true,
+        ))
+        assertFalse(CandidatePreviewPolicy.shouldReuseSelectedOrigin(
+            FinalDecision.REUSE_SELECTED_ORIGIN,
+            requireAutoSwitch = false,
+            snapshotMatches = true,
+            sameAccessibilityInstance = true,
+        ))
+        assertFalse(CandidatePreviewPolicy.shouldReuseSelectedOrigin(
+            FinalDecision.REUSE_SELECTED_ORIGIN,
+            requireAutoSwitch = true,
+            snapshotMatches = false,
+            sameAccessibilityInstance = true,
+        ))
+        assertFalse(CandidatePreviewPolicy.shouldReuseSelectedOrigin(
+            FinalDecision.REUSE_SELECTED_ORIGIN,
+            requireAutoSwitch = true,
+            snapshotMatches = true,
+            sameAccessibilityInstance = false,
+        ))
     }
 
     @Test

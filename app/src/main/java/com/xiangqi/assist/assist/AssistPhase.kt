@@ -304,14 +304,14 @@ object AssistPhase {
         return now - base <= windowMs
     }
 
-    /** 落子阶段上限：超过就认为这一手没指望了，复位重来 */
-    const val LANDING_TIMEOUT_MS = 5_000L
+    /** 落子阶段超时：超过就认为这段落子事务没有进展，重新核对棋面。 */
+    const val LANDING_TIMEOUT_MS = 2_500L
 
-    /** 更新棋谱上限 */
-    const val REFRESH_TIMEOUT_MS = 6_000L
+    /** 用户显式更新棋谱请求的硬超时。 */
+    const val REFRESH_TIMEOUT_MS = 3_000L
 
-    /** 长时间识别不到画面的上限 */
-    const val NO_MAP_TIMEOUT_MS = 20_000L
+    /** 曾经成功识盘后，持续没有任何有效盘面才触发的保护期限。 */
+    const val NO_MAP_TIMEOUT_MS = 10_000L
 
     /** 引擎就绪上限 */
     const val ENGINE_READY_TIMEOUT_MS = 30_000L

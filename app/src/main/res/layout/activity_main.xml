@@ -55,26 +55,26 @@
             android:orientation="vertical">
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/button_play"
+                android:id="@+id/button_link"
                 style="@style/Widget.XiangqiAssist.Button.Primary"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="对弈"
+                android:text="悬浮窗辅助"
                 android:textAllCaps="false"
-                app:icon="@drawable/game"
+                app:icon="@drawable/intelligence"
                 app:iconGravity="textStart"
                 app:iconPadding="10dp"
                 app:iconTint="@color/brand_navy_950" />
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/button_link"
+                android:id="@+id/button_play"
                 style="@style/Widget.XiangqiAssist.Button.Secondary"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="12dp"
-                android:text="悬浮窗辅助"
+                android:text="对弈"
                 android:textAllCaps="false"
-                app:icon="@drawable/intelligence"
+                app:icon="@drawable/game"
                 app:iconGravity="textStart"
                 app:iconPadding="10dp"
                 app:iconTint="@color/brand_gold_300" />

@@ -63,15 +63,6 @@
                 android:text="一键准备"
                 android:textAllCaps="false" />
 
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/btn_run_control"
-                style="@style/Widget.XiangqiAssist.Button.Secondary"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginTop="10dp"
-                android:text="一键启动"
-                android:textAllCaps="false" />
-
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"

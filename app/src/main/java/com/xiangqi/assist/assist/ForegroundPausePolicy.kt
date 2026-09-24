@@ -11,14 +11,31 @@ object ForegroundPausePolicy {
     data class Snapshot(
         val wasRunning: Boolean,
         val resumePackage: String,
+        /** true=因离开前台而临时暂停；用户点击暂停后主动等待返回则为 false。 */
+        val suspendedByForeground: Boolean = true,
     )
 
-    fun capture(paused: Boolean, resumePackage: String?): Snapshot? {
+    fun capture(
+        paused: Boolean,
+        resumePackage: String?,
+        suspendedByForeground: Boolean = true,
+    ): Snapshot? {
         val pkg = resumePackage?.trim().orEmpty()
         if (pkg.isEmpty()) return null
-        return Snapshot(wasRunning = !paused, resumePackage = pkg)
+        return Snapshot(
+            wasRunning = !paused,
+            resumePackage = pkg,
+            suspendedByForeground = suspendedByForeground,
+        )
     }
 
     fun shouldResume(snapshot: Snapshot?, returnedPackage: String?): Boolean =
-        snapshot?.wasRunning == true && snapshot.resumePackage == returnedPackage?.trim()
+        snapshot?.wasRunning == true &&
+            snapshot.suspendedByForeground &&
+            snapshot.resumePackage == returnedPackage?.trim()
+
+    /** 授权恢复或手动继续时，只有目标应用在前台才允许启动录屏管线。 */
+    fun isResumeTarget(snapshot: Snapshot?, currentPackage: String?): Boolean =
+        snapshot != null &&
+            snapshot.resumePackage == currentPackage?.trim()
 }
