@@ -21,6 +21,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import com.xiangqi.assist.R
@@ -30,6 +31,7 @@ import com.xiangqi.assist.assist.AssistConfig
 import com.xiangqi.assist.assist.AssistRunControlPolicy
 import com.xiangqi.assist.assist.EngineTuningPolicy
 import com.xiangqi.assist.assist.ScreenAssistService
+import com.xiangqi.assist.assist.YoloModelTier
 import com.xiangqi.assist.assist.access.AssistAccessibilityService
 import com.xiangqi.assist.assist.access.RootHelper
 import kotlin.math.roundToInt
@@ -48,6 +50,9 @@ class AssistActivity : AppCompatActivity() {
     private var preparationPending = false
     private var preparationRootAttempted = false
     private var preparationRootInFlight = false
+    /** 当前“一键准备”流程是否已经通过模型兼容性门。 */
+    private var preparationModelCheckPending = false
+    private var preparationModelCheckDone = false
     /** 暂停后系统录屏授权页是否已经发起，避免 onResume/轮询重复弹出。 */
     private var resumeAuthorizationLaunched = false
     private var resumeAuthorizationRequested = false
@@ -61,6 +66,8 @@ class AssistActivity : AppCompatActivity() {
     private lateinit var btnAutoPlay: Button
     private lateinit var btnMoveGesture: Button
     private lateinit var btnEngineThreads: Button
+    private lateinit var btnYoloModel: Button
+    private lateinit var tvYoloHint: TextView
     private lateinit var ballScale: SeekBar
     private lateinit var ballScaleLabel: TextView
     private lateinit var tvStatus: TextView
@@ -80,6 +87,8 @@ class AssistActivity : AppCompatActivity() {
 
     /** root 探测结果（null=尚未探测完；探测在后台线程进行，避免 su 阻塞界面） */
     @Volatile private var rooted: Boolean? = null
+    /** 已向用户展示过的模型兼容性提示，避免状态轮询重复弹窗。 */
+    private var shownYoloModelMessage: String? = null
 
     private val connection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName?, binder: IBinder?) {
@@ -106,6 +115,7 @@ class AssistActivity : AppCompatActivity() {
             if (resuming) {
                 service?.acceptCaptureGrant(result.resultCode, result.data)
                 preparationPending = false
+                preparationModelCheckDone = false
                 Toast.makeText(this, "录屏权限已恢复；回到原棋盘应用后继续识别", Toast.LENGTH_LONG).show()
                 finish()
                 return@registerForActivityResult
@@ -114,6 +124,7 @@ class AssistActivity : AppCompatActivity() {
             captureIntentData = result.data
             startCaptureService(resumeCapture = false)
             preparationPending = false
+            preparationModelCheckDone = false
             Toast.makeText(this, "准备完成，当前保持暂停；打开悬浮窗并点击开始后才会识别", Toast.LENGTH_LONG).show()
         } else {
             preparationPending = false
@@ -154,6 +165,8 @@ class AssistActivity : AppCompatActivity() {
         btnAutoPlay = findViewById(R.id.btn_auto_play)
         btnMoveGesture = findViewById(R.id.btn_move_gesture)
         btnEngineThreads = findViewById(R.id.btn_engine_threads)
+        btnYoloModel = findViewById(R.id.btn_yolo_model)
+        tvYoloHint = findViewById(R.id.tv_yolo_hint)
         ballScale = findViewById(R.id.seekbar_ball_scale)
         ballScaleLabel = findViewById(R.id.tv_ball_scale_label)
         tvStatus = findViewById(R.id.tv_auto_status)
@@ -201,6 +214,7 @@ class AssistActivity : AppCompatActivity() {
         btnAutoPlay.setOnClickListener { toggleAutoPlay() }
         btnMoveGesture.setOnClickListener { toggleMoveGesture() }
         btnEngineThreads.setOnClickListener { cycleEngineThreads() }
+        btnYoloModel.setOnClickListener { showYoloModelChooser() }
 
         bindService(Intent(this, ScreenAssistService::class.java), connection, Context.BIND_AUTO_CREATE)
         handleIncomingIntent(intent)
@@ -285,6 +299,40 @@ class AssistActivity : AppCompatActivity() {
         }
 
         val cfg = AssistConfig(this)
+        if (!preparationModelCheckDone && !preparationModelCheckPending) {
+            preparationModelCheckPending = true
+            Toast.makeText(this, "正在检查${cfg.yoloModelTier.displayName}识别模型兼容性…", Toast.LENGTH_SHORT).show()
+            val modelService = runningService
+            if (modelService == null) {
+                preparationModelCheckPending = false
+                Toast.makeText(this, "运行服务正在连接，稍后会继续检查识别模型", Toast.LENGTH_SHORT).show()
+                statusHandler.postDelayed({
+                    if (preparationPending) continueEnvironmentPreparation()
+                }, 250L)
+                return
+            }
+            modelService.ensureYoloModelReady { result ->
+                preparationModelCheckPending = false
+                if (!result.success) {
+                    preparationPending = false
+                    preparationModelCheckDone = false
+                    Toast.makeText(this, result.userMessage(), Toast.LENGTH_LONG).show()
+                    refreshStatus()
+                } else {
+                    preparationModelCheckDone = true
+                    if (result.wasFallback) {
+                        shownYoloModelMessage = result.userMessage()
+                        AlertDialog.Builder(this)
+                            .setTitle("识别模型已自动回退")
+                            .setMessage(result.userMessage())
+                            .setPositiveButton("继续准备", null)
+                            .show()
+                    }
+                    continueEnvironmentPreparation()
+                }
+            }
+            return
+        }
         if (cfg.autoPlay && !AssistAccessibilityService.isConnected()) {
             if (rooted == null) {
                 Toast.makeText(this, "正在检查 root 环境，完成后将自动继续…", Toast.LENGTH_SHORT).show()
@@ -332,6 +380,7 @@ class AssistActivity : AppCompatActivity() {
         }
         if (runningService?.isPrepared() == true && runningService.isProjectionAuthorized()) {
             preparationPending = false
+            preparationModelCheckDone = false
             Toast.makeText(
                 this,
                 if (runningService.isCapturing()) "运行环境已准备且正在识别"
@@ -373,6 +422,8 @@ class AssistActivity : AppCompatActivity() {
         if (!preparedIntent && !prepared) {
             preparationPending = true
             preparationRootAttempted = false
+            preparationModelCheckDone = false
+            preparationModelCheckPending = false
             continueEnvironmentPreparation()
             return
         }
@@ -423,6 +474,54 @@ class AssistActivity : AppCompatActivity() {
         }
         refreshStatus()
     }
+
+    /** 识别模型选择：兼容性探测成功后才写入实际档位；负载只作为提示，不自动降级。 */
+    private fun showYoloModelChooser() {
+        val cfg = AssistConfig(this)
+        val tiers = YoloModelTier.values()
+        val labels = tiers.map { tier ->
+            "${tier.displayName}：${tier.selectionHint}"
+        }.toTypedArray()
+        val current = tiers.indexOf(cfg.yoloModelTier).coerceAtLeast(0)
+        AlertDialog.Builder(this)
+            .setTitle("选择识别模型")
+            .setSingleChoiceItems(labels, current) { dialog, which ->
+                val requested = tiers[which]
+                dialog.dismiss()
+                btnYoloModel.isEnabled = false
+                tvYoloHint.text = "正在检查${requested.displayName}模型兼容性；只检查模型能否加载和执行，不按当前负载回退。"
+                val complete: (com.xiangqi.assist.assist.YoloModelSelectionResult) -> Unit = { result ->
+                    runOnUiThread {
+                        btnYoloModel.isEnabled = true
+                        val explain = !result.success || result.wasFallback
+                        // refreshStatus 也会展示服务返回的状态；先记账，避免同一结果弹两次。
+                        if (explain) shownYoloModelMessage = result.userMessage()
+                        refreshStatus()
+                        if (explain) {
+                            AlertDialog.Builder(this)
+                                .setTitle(if (result.success) "模型已自动回退" else "模型不可用")
+                                .setMessage(result.userMessage())
+                                .setPositiveButton("知道了", null)
+                                .show()
+                        }
+                    }
+                }
+                val svc = service
+                if (svc != null) {
+                    svc.requestYoloModelTier(requested, complete)
+                } else {
+                    // 未绑定服务时不能把“已写入偏好”冒充成兼容性探测通过。
+                    btnYoloModel.isEnabled = true
+                    tvYoloHint.text = "识别服务尚未连接，暂时无法检查设备兼容性；请稍后重试。"
+                    Toast.makeText(this, "识别服务尚未连接，未更改模型设置", Toast.LENGTH_SHORT).show()
+                }
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun yoloHint(tier: YoloModelTier): String =
+        "${tier.selectionHint}。兼容性失败时按大型→中型→Lite回退；负载、温度和功耗不会强制回退。"
 
     /**
      * 落子方式开关。默认点击式：先点棋子，再点目标格；只有用户明确切换才用拖动式。
@@ -494,6 +593,8 @@ class AssistActivity : AppCompatActivity() {
             )
         )
 
+        btnYoloModel.isEnabled = !preparationModelCheckPending
+
         val accessEnabled = AssistAccessibilityService.isEnabledInSettings(this)
         val accessConnected = AssistAccessibilityService.isConnected()
         btnAccessibility.text = when {
@@ -535,6 +636,20 @@ class AssistActivity : AppCompatActivity() {
             "自动（${EngineTuningPolicy.autoThreads(Runtime.getRuntime().availableProcessors())}）"
         } else {
             threads.toString()
+        }
+
+        val modelConfig = AssistConfig(this)
+        val actualModel = svc?.yoloModelTier() ?: modelConfig.yoloModelTier
+        btnYoloModel.text = "识别模型：${actualModel.displayName}"
+        val modelMessage = svc?.yoloModelSelectionMessage()?.takeIf { it.isNotBlank() }
+        tvYoloHint.text = modelMessage ?: yoloHint(actualModel)
+        if (modelMessage != null && modelMessage != shownYoloModelMessage && preparedIntent) {
+            shownYoloModelMessage = modelMessage
+            AlertDialog.Builder(this)
+                .setTitle("识别模型状态")
+                .setMessage(modelMessage)
+                .setPositiveButton("知道了", null)
+                .show()
         }
 
         tvAutoHint.text = when {

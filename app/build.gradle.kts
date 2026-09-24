@@ -22,8 +22,8 @@ android {
         applicationId = "com.xiangqi.assist"
         minSdk = 26
         targetSdk = 33
-        versionCode = 3
-        versionName = "1.2"
+        versionCode = 4
+        versionName = "1.3"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -141,7 +141,7 @@ tasks.named("preBuild") {
 dependencies {
     // https://withme.skullzbones.com/blog/programming/execute-native-binaries-android-q-no-root/
     implementation(files("$buildDir/native-libs/native-libs.jar"))
-    // YOLOv5 棋子检测推理（优先使用 medium FP32 模型，设备内存不足时回退 n FP16 模型）
+    // YOLOv5 棋子检测推理（Large/Medium/Lite 由辅助页选择；按 Interpreter 兼容性自动向下回退）
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("com.readystatesoftware.sqliteasset:sqliteassethelper:+")
     // https://mvnrepository.com/artifact/com.igormaznitsa/jbbp

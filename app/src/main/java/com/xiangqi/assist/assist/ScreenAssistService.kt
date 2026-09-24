@@ -514,6 +514,128 @@ class ScreenAssistService : Service() {
         }
     }
 
+    /** 当前识别模型的实际档位；设置页只显示已通过兼容性探测的档位。 */
+    fun yoloModelTier(): YoloModelTier = yoloDetector?.modelTier ?: config.yoloModelTier
+
+    /** 最近一次模型选择/自动回退的用户可读说明；正常无回退时为空。 */
+    fun yoloModelSelectionMessage(): String? = yoloSelectionMessage
+
+    /** 准备或重新开始前共用的兼容性门；当前 detector 存在即说明已通过同一探测链。 */
+    fun ensureYoloModelReady(callback: (YoloModelSelectionResult) -> Unit) {
+        mainHandler.post {
+            yoloDetector?.let { detector ->
+                callback(detector.selectionResult)
+                return@post
+            }
+            val requested = config.yoloModelTier
+            workerHandler.post {
+                var detector: YoloBoardDetector? = null
+                val result = try {
+                    YoloBoardDetector(this@ScreenAssistService, requested).also { detector = it }.selectionResult
+                } catch (t: Throwable) {
+                    (t as? YoloModelUnavailableException)?.selection
+                        ?: YoloModelSelectionResult(
+                            requested = requested,
+                            actual = null,
+                            modelFile = null,
+                            fatalReason = t.message ?: t::class.java.simpleName,
+                        )
+                }
+                mainHandler.post {
+                    if (stopping || overlayClosed) {
+                        runCatching { detector?.close() }
+                        callback(result)
+                        return@post
+                    }
+                    yoloDetector = detector
+                    if (detector != null) {
+                        config.yoloModelTier = detector!!.modelTier
+                        yoloSelectionMessage = if (result.wasFallback) result.userMessage() else null
+                    } else {
+                        yoloSelectionMessage = result.userMessage()
+                    }
+                    postRender()
+                    callback(result)
+                }
+            }
+        }
+    }
+
+    /**
+     * 用户切换识别模型。模型切换在后台完成：先停止接受新推理、等待在途任务退出,
+     * 再创建目标档位并按 Large→Medium→Lite 规则探测；成功后把实际档位写回设置。
+     */
+    fun requestYoloModelTier(
+        requested: YoloModelTier,
+        callback: (YoloModelSelectionResult) -> Unit,
+    ) {
+        mainHandler.post {
+            if (stopping || overlayClosed) return@post
+            val previous = yoloDetector
+            val previousTier = previous?.modelTier
+            yoloDetector = null
+            recognitionEpoch++
+            stableFrameWindow.reset()
+            sessionGrid = null
+            lastFullVisionCheckAt = 0L
+            yoloSelectionMessage = "正在检查${requested.displayName}模型兼容性…"
+            setStatus(yoloSelectionMessage!!)
+            workerHandler.post {
+                runCatching { previous?.close() }
+                var replacement: YoloBoardDetector? = null
+                var result: YoloModelSelectionResult
+                try {
+                    replacement = YoloBoardDetector(this@ScreenAssistService, requested)
+                    result = replacement!!.selectionResult
+                } catch (t: Throwable) {
+                    val failure = (t as? YoloModelUnavailableException)?.selection
+                        ?: YoloModelSelectionResult(
+                            requested = requested,
+                            actual = null,
+                            modelFile = null,
+                            fatalReason = t.message ?: t::class.java.simpleName,
+                        )
+                    // 保留一个已经可用的旧档位作为可逆恢复路径；不能留下半切换状态。
+                    if (previousTier != null) {
+                        replacement = runCatching {
+                            YoloBoardDetector(this@ScreenAssistService, previousTier)
+                        }.getOrNull()
+                    }
+                    result = if (replacement != null) {
+                        failure.copy(
+                            actual = replacement!!.modelTier,
+                            modelFile = replacement!!.modelFile,
+                        )
+                    } else {
+                        failure
+                    }
+                }
+                val ready = replacement
+                mainHandler.post {
+                    if (stopping || overlayClosed) {
+                        runCatching { ready?.close() }
+                        callback(result)
+                        return@post
+                    }
+                    yoloDetector = ready
+                    if (ready != null) {
+                        config.yoloModelTier = ready.modelTier
+                        yoloSelectionMessage = if (result.wasFallback) result.userMessage() else null
+                        setStatus(
+                            if (result.wasFallback) result.userMessage()
+                            else "已启用${ready.modelTier.displayName}模型"
+                        )
+                    } else {
+                        yoloSelectionMessage = result.userMessage()
+                        setStatus(result.userMessage())
+                    }
+                    postRender()
+                    callback(result)
+                }
+            }
+        }
+    }
+
     /** 由辅助页设置引擎线程数（0=自动，1..8=指定）；对下一次搜索生效。 */
     fun requestEngineThreads(setting: Int) {
         mainHandler.post {
@@ -686,7 +808,9 @@ class ScreenAssistService : Service() {
     @Volatile private var lastMapAtForWatchdog = -1L
 
     private var tracker = BoardTracker(2)
-    private var yoloDetector: YoloBoardDetector? = null
+    @Volatile private var yoloDetector: YoloBoardDetector? = null
+    /** 最近一次档位探测发生了自动回退或全部失败时的可读原因。 */
+    @Volatile private var yoloSelectionMessage: String? = null
     @Volatile private var yoloMissStreak = 0
     /** 裁剪推理下连续不稳定的帧数（棋盘挪动后残框自锁时回退全屏重定位） */
     @Volatile private var cropUnstableStreak = 0
@@ -807,6 +931,8 @@ class ScreenAssistService : Service() {
     private val analysisCycleGate = AnalysisCycleGate()
     /** 当前允许写回界面的搜索会话；同 FEN 的旧 bestmove 也会被拒绝。 */
     @Volatile private var expectedAnalysisId = 0L
+    /** 实际提交给引擎的不可变预算；运行状态不得从可能已改变的偏好设置推算。 */
+    @Volatile private var activeAnalysisBudget: AnalysisBudget? = null
 
     // ==================== 响应链路计时（真机验证用） ====================
     // 口径：稳定窗口完成 → 提交搜索 → 首条 PV 返回 → 搜索结束。
@@ -1225,15 +1351,11 @@ class ScreenAssistService : Service() {
             config.thinkTimeMs = ThinkingOptions.DEFAULT_TIME_MS
             fallback
         }
-        // YOLO 棋子检测：直接检测 14 类棋子 + 棋盘框，免校准、跨 App 泛化。
-        // 初始化失败（含 JVM 测试环境无 TFLite 原生库的 UnsatisfiedLinkError）只提示，不阻塞服务
-        yoloDetector = try {
-            YoloBoardDetector(this)
-        } catch (t: Throwable) {
-            Log.w(TAG, "yolo detector init failed", t)
-            null
-        }
-        Log.i(TAG, "yolo detector: ${yoloDetector?.modelFile ?: "unavailable"}")
+        // 模型加载放到“一键准备/开始”共用的兼容性门中，避免绑定辅助页时在服务主线程
+        // 同步分配几十 MB native 张量；准备和悬浮窗开始最终走同一条后台探测链。
+        yoloDetector = null
+        yoloSelectionMessage = null
+        Log.i(TAG, "yolo detector pending: requested tier=${config.yoloModelTier.name}")
     }
 
     override fun onBind(intent: Intent?): IBinder = binder
@@ -2119,7 +2241,9 @@ class ScreenAssistService : Service() {
             // 结构不合法：本次关键帧直接拒绝，下一组稳定窗口重新检测；不把旧棋面写回当前结果。
             refresh.consumeAttempt(unusable)
             if (refresh.checkGiveUp(System.currentTimeMillis(), unusable)) {
+                val lastReject = refresh.failReason ?: unusable
                 finishRefreshRequest()
+                setStatus("更新棋谱失败：$lastReject\n已保留当前棋面，请稍后重试")
                 postRender()
             } else {
                 setStatus("棋面仍不合法：$unusable\n拒绝当前关键帧，继续录屏稳定窗口轮询…")
@@ -2290,7 +2414,8 @@ class ScreenAssistService : Service() {
         val activeLanding = landingState
         trace(
             "VISION_RESULT",
-            "pieces=${mapped.pieceCount} anchor=${mapped.anchorSource} orientation=${mapped.orientation} " +
+            "pieces=${mapped.pieceCount} effectivePieces=${canonical.sumOf { row -> row.count { it != Piece.EMPTY } }} " +
+                "anchor=${mapped.anchorSource} orientation=${mapped.orientation} " +
                 "stable=$stableFrameCount landing=${activeLanding?.stage}"
         )
         val unsafe = if (activeLanding != null) {
@@ -2670,6 +2795,7 @@ class ScreenAssistService : Service() {
         trace("SEARCH_STOP", "fen=$currentFen id=$expectedAnalysisId searching=$searching")
         runCatching { analysisEngine?.stopSearch() }
         expectedAnalysisId = 0L
+        activeAnalysisBudget = null
         searching = false
         searchSettled = false
         lastSearchCpuTimeMs = -1L
@@ -2703,6 +2829,7 @@ class ScreenAssistService : Service() {
         }
         analyzedFen = ""   // 兼容旧诊断字段；真正的周期闸门由analysisCycleGate控制。
         expectedAnalysisId = 0L
+        activeAnalysisBudget = null
         lastAnalysis = null
         selectedCandidate = 0
         bookMoves = null
@@ -2864,33 +2991,30 @@ class ScreenAssistService : Service() {
                     AnalysisBudget.forTotalTime(totalMs, config.candidateCount)
                 }
             }
+            val requestBudget = budget.normalized()
+            val requestStatus = if (myTurn) {
+                "引擎计算中…（${requestBudget.statusLabel()}）"
+            } else {
+                null
+            }
             analysisRequestAt = System.currentTimeMillis()
             searchProgressAt = analysisRequestAt
             searchStartAt = analysisRequestAt
             firstPvAt = 0L
             lastSearchCpuTimeMs = -1L
             searchCpuProgressAt = 0L
-            expectedAnalysisId = analysisEngine?.request(fen, budget) ?: 0L
+            expectedAnalysisId = analysisEngine?.request(fen, requestBudget) ?: 0L
+            activeAnalysisBudget = requestBudget.takeIf { expectedAnalysisId > 0L }
             searching = expectedAnalysisId > 0L
             if (!searching) searchStartAt = 0L
             previewState.onContext(fen, expectedAnalysisId)
-            Log.i(TAG, "analysis request fen=$fen budget=${budget.goCommand()} id=$expectedAnalysisId")
+            Log.i(TAG, "analysis request fen=$fen budget=${requestBudget.goCommand()} id=$expectedAnalysisId")
             trace(
                 "ANALYSIS_REQUEST",
-                "id=$expectedAnalysisId fen=$fen budget=${budget.goCommand()} myTurn=$myTurn"
+                "id=$expectedAnalysisId fen=$fen budget=${requestBudget.goCommand()} myTurn=$myTurn"
             )
             mainHandler.post { postRender() }
-            if (myTurn) {
-                val label = if (mode == ThinkingMode.DEPTH) {
-                    "深度 $searchDepthTarget · ${config.candidateCount}条共享"
-                } else {
-                    val total = if (mode == ThinkingMode.PER_CANDIDATE_TIME) {
-                        ThinkingOptions.effectivePerCandidateTotal(config.perCandidateTimeMs, config.candidateCount)
-                    } else config.thinkTimeMs
-                    "${config.candidateCount}条 · 每候选 ${ThinkingOptions.formatTime(config.perCandidateTimeMs.toLong())}（总计 ${ThinkingOptions.formatTime(total.toLong())}）"
-                }
-                mainHandler.post { setStatus("引擎计算中…（$label）") }
-            }
+            requestStatus?.let { text -> mainHandler.post { setStatus(text) } }
         }
     }
 
@@ -3008,6 +3132,7 @@ class ScreenAssistService : Service() {
                 // 引擎进程重启是当前分析周期的真实失败；清除闸门后由 ready 回调重新提交同一局面。
                 analysisCycleGate.invalidate()
                 expectedAnalysisId = 0L
+                activeAnalysisBudget = null
                 setStatus("$reason\n稍后自动恢复分析")
                 postRender()
             }
@@ -3031,6 +3156,7 @@ class ScreenAssistService : Service() {
                 adviceBoard = null
                 analysisCycleGate.invalidate()
                 expectedAnalysisId = 0L
+                activeAnalysisBudget = null
                 val short = if (message.length > 40) message.take(40) + "…" else message
                 engineErrorText = short
                 setStatus("引擎异常：$short")
@@ -3541,9 +3667,10 @@ class ScreenAssistService : Service() {
             AssistPhase.WatchdogAction.FAIL_REFRESH -> {
                 refresh.consumeAttempt("取画面超时")
                 if (refresh.checkGiveUp(now, "取画面超时（未收到可用画面）")) {
+                    val lastReject = refresh.failReason
                     finishRefreshRequest()
                     syncCaptureDemand()
-                    setStatus("更新棋谱失败：${refresh.failReason}\n请确认已完成一键准备后，在悬浮窗内点击开始")
+                    setStatus("更新棋谱失败：${lastReject ?: "连续关键帧未通过棋面校验"}\n已保留当前棋面，请稍后重试")
                     postRender()
                 }
             }
@@ -3640,6 +3767,19 @@ class ScreenAssistService : Service() {
      * - 运行中显示“暂停”，只停运行管线，不清棋谱和日志。
      */
     private fun toggleRun() {
+        if (yoloDetector == null) {
+            setStatus("正在按当前设置检查识别模型兼容性…")
+            ensureYoloModelReady { result ->
+                if (result.success) {
+                    toggleRun()
+                } else {
+                    paused = true
+                    setStatus(result.userMessage())
+                    postRender()
+                }
+            }
+            return
+        }
         val snapshot = foregroundPauseSnapshot
         val resumeSnapshot = snapshot?.takeIf { it.suspendedByForeground && it.wasRunning }
         if (resumeSnapshot != null) {
@@ -4081,8 +4221,9 @@ class ScreenAssistService : Service() {
     }
 
     /**
-     * 更新棋谱：半自动模式下把最近一轮持续识别到的棋面正式应用；其他模式也会
-     * 重新开启稳定录屏窗口，成功后立即应用到棋面。
+     * 用户主动“更新棋谱”是一次独立取证事务：不应因自动阶段看门狗或旧的
+     * `RefreshRequest`尝试次数耗尽而提前结束。每次点击都从新的稳定窗口开始，
+     * 失败原因保留给用户，但不把旧棋面伪装成刷新成功。
      */
     private fun refreshBoardFromScreen() {
         if (paused) {
@@ -4504,7 +4645,8 @@ class ScreenAssistService : Service() {
 
     /** 识别状态：是否定位到棋盘、检出子数、单帧耗时、所用锚点；失败时给出具体原因 */
     private fun recognitionStatusLine(): String {
-        val yolo = yoloDetector ?: return "识别：模型未加载（请重启应用）"
+        val yolo = yoloDetector ?: return "识别：模型未加载（请检查模型设置）"
+        val modelLabel = "模型${yolo.modelTier.displayName}"
         val now = System.currentTimeMillis()
         // 口径跟随阶段：只有"识盘中/更新棋谱中"才以识别为主任务。
         // 落子/计算阶段若还写"识别：未定位"，就会出现"标题写着落子中、正文写着未定位"的矛盾
@@ -4527,7 +4669,7 @@ class ScreenAssistService : Service() {
         }
         // 取帧策略只说明“我们打算取不取”，这里再补一句“画面实际上还在不在进来”，
         // 用户才能分清“一直在识别只是没认出来”和“画面根本断了”。
-        val pipelineNote = captureNote + streamLivenessNote()
+        val pipelineNote = captureNote + streamLivenessNote() + " · $modelLabel"
         if (lastMappedAt > 0 && now - lastMappedAt < 1500) {
             val anchor = when (lastAnchorSource) {
                 DetectionBoardMapper.AnchorSource.BOARD_BOX -> "棋盘框"
@@ -4595,11 +4737,14 @@ class ScreenAssistService : Service() {
                     ) " · 暂无新状态行，控制链正常" else " · 控制链正常"
                 else -> " · 等待控制链响应"
             }
-            val el = elapsedMs / 1000.0
-            return if (config.thinkingMode == ThinkingMode.DEPTH) {
-                "引擎：计算中 深度$d/$searchDepthTarget · ${"%.1f".format(el)}s$controlNote"
-            } else {
-                "引擎：计算中 自适应深度 · ${"%.1f".format(el)}/${ThinkingOptions.formatTime(config.thinkTimeMs.toLong())}$controlNote"
+            val elapsed = "${"%.1f".format(elapsedMs / 1000.0)}s"
+            val budget = activeAnalysisBudget
+            return when {
+                budget?.maxDepth != null ->
+                    "引擎：计算中 深度$d/${budget.maxDepth} · $elapsed$controlNote"
+                budget != null ->
+                    "引擎：计算中 ${budget.statusLabel()} · $elapsed$controlNote"
+                else -> "引擎：计算中（预算待提交）· $elapsed$controlNote"
             }
         }
         return if (searchSettled) {
@@ -5328,6 +5473,7 @@ class ScreenAssistService : Service() {
         // searchSettled 或旧建议写回来。
         val detachedAnalysisId = expectedAnalysisId
         expectedAnalysisId = 0L
+        activeAnalysisBudget = null
         searching = false
         searchSettled = false
         trace("ANALYSIS_DETACH_FOR_LANDING", "id=$detachedAnalysisId fen=${pending.fen}")

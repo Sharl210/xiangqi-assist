@@ -177,6 +177,24 @@
                 android:textStyle="bold" />
 
             <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_yolo_model"
+                style="@style/Widget.XiangqiAssist.Button.Secondary"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="识别模型：大型"
+                android:textAllCaps="false" />
+
+            <TextView
+                android:id="@+id/tv_yolo_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="8dp"
+                android:text="大型优先识别能力；设备不兼容时按大型→中型→Lite自动回退。负载和温度只作提示。"
+                android:textColor="@color/brand_text_secondary"
+                android:textSize="12sp" />
+
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/btn_engine_threads"
                 style="@style/Widget.XiangqiAssist.Button.Secondary"
                 android:layout_width="match_parent"

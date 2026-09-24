@@ -54,6 +54,15 @@ data class AnalysisBudget(
         if (totalTimeMs > 0) append(" movetime ").append(totalTimeMs)
     }
 
+    /** Create the visible label from this exact command budget; never reread mutable settings. */
+    fun statusLabel(): String = when {
+        maxDepth != null -> "深度 $maxDepth · ${candidateCount}条共享"
+        perCandidateTimeMs != null ->
+            "${candidateCount}条 · 每候选 ${ThinkingOptions.formatTime(perCandidateTimeMs.toLong())}" +
+                "（总计 ${ThinkingOptions.formatTime(totalTimeMs.toLong())}）"
+        else -> "${candidateCount}条共享总时 ${ThinkingOptions.formatTime(totalTimeMs.toLong())}"
+    }
+
     companion object {
         fun forDepth(depth: Int, candidates: Int = 3): AnalysisBudget =
             AnalysisBudget(AssistDepth.clamp(depth), 0, candidates)

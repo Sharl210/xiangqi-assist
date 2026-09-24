@@ -67,6 +67,29 @@ class AnalysisBudgetTest {
     }
 
     @Test
+    fun `status label follows the exact total time command budget`() {
+        val budget = AnalysisBudget.forTotalTime(100, candidates = 1).normalized()
+        assertEquals("go movetime 100", budget.goCommand())
+        assertEquals("1条共享总时 0.1s", budget.statusLabel())
+    }
+
+    @Test
+    fun `per candidate status label reports multiplied total budget`() {
+        val one = AnalysisBudget.forPerCandidateTime(3_000, candidates = 1).normalized()
+        assertEquals("1条 · 每候选 3s（总计 3s）", one.statusLabel())
+        val three = AnalysisBudget.forPerCandidateTime(3_000, candidates = 3).normalized()
+        assertEquals("3条 · 每候选 3s（总计 9s）", three.statusLabel())
+        assertEquals("go movetime 9000", three.goCommand())
+    }
+
+    @Test
+    fun `depth status label uses the submitted depth budget`() {
+        val budget = AnalysisBudget.forDepth(20, candidates = 1).normalized()
+        assertEquals("深度 20 · 1条共享", budget.statusLabel())
+        assertEquals("go depth 20", budget.goCommand())
+    }
+
+    @Test
     fun `depth is clamped to sixty four inside a budget`() {
         assertEquals(64, AnalysisBudget(maxDepth = 512, totalTimeMs = 0).normalized().maxDepth)
     }

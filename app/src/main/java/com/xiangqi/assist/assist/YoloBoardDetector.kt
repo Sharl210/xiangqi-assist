@@ -7,6 +7,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.RectF
 import android.util.Log
+import org.tensorflow.lite.DataType
 import org.tensorflow.lite.Interpreter
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
@@ -18,9 +19,10 @@ import kotlin.math.roundToInt
 /**
  * YOLOv5 棋子检测器（Android 侧，TFLite）。
  *
- * 模型：优先使用 `assets/yolov5m_xq_fp32.tflite`（YOLOv5 medium，FP32 激活，输入 NHWC float32，
- * 输出 [1,25200,20] float32）；如果设备的TFLite运行时无法分配该模型，才回退到
- * `assets/yolov5n_xq_fp16.tflite`。输入为 RGB（不是 BGR，BGR 会把红黑阵营互换）。
+ * 模型：按用户记忆的档位尝试大型→中型→Lite；每个候选都必须通过资产读取、Interpreter 创建、张量分配、
+ * 输入 NHWC float32 `[1,640,640,3]`、输出 `[1,25200,20]` 和一次受控推理。当前大型档是由 XQ Medium 与 universal/旋转鲁棒模型组成的逐锚点集成模型，
+ * 文件约 54.26 MiB，保留相同后处理契约；中型和 Lite 分别使用现有 `yolov5m_xq_fp32.tflite` 与 `yolov5n_xq_fp16.tflite`。
+ * 输入为 RGB（不是 BGR，BGR 会把红黑阵营互换）。
  * 纯推理封装：解码与棋盘映射在纯 JVM 的 YoloPostprocessor / DetectionBoardMapper 中，
  * 便于单元测试。
  *
@@ -29,14 +31,24 @@ import kotlin.math.roundToInt
  * - 像素 -> float 在 JVM 内一次性写入复用数组，再整块 put 进输入缓冲（避免百万次 putFloat JNI）；
  * - 解码直接消费解释器输出（无 2MB flat 拷贝）。
  */
-class YoloBoardDetector(context: Context) {
+class YoloBoardDetector(
+    context: Context,
+    requestedTier: YoloModelTier = YoloModelTier.LARGE,
+) {
 
-    private data class RuntimeModel(val interpreter: Interpreter, val file: String)
-    private val runtimeModel = createRuntimeModel(context)
+    private data class RuntimeModel(
+        val interpreter: Interpreter,
+        val tier: YoloModelTier,
+        val file: String,
+        val selectionResult: YoloModelSelectionResult,
+    )
+    private val runtimeModel = createRuntimeModel(context, requestedTier)
     private val inferenceGate = InferenceLifecycleGate()
     @Volatile private var closed = false
     private val interpreter: Interpreter = runtimeModel.interpreter
-    /** 实际选用的模型，日志/状态诊断用。 */
+    /** 实际使用档位及这次探测的回退信息，供服务和设置页同步显示。 */
+    val selectionResult: YoloModelSelectionResult = runtimeModel.selectionResult
+    val modelTier: YoloModelTier = runtimeModel.tier
     val modelFile: String = runtimeModel.file
     private val input: ByteBuffer
     private val inputFloat: FloatArray
@@ -57,39 +69,81 @@ class YoloBoardDetector(context: Context) {
     }
 
     /**
-     * 选择并验证模型：主模型和回退模型都必须是可分配的 NHWC/25200×20 张量；
-     * 不接受“文件存在但输入输出布局不匹配”的模型。
+     * 按用户选择向下探测模型。每个候选都必须真实创建 Interpreter、分配张量、
+     * 核对输入/输出契约并完成一次零输入受控推理；任何一步失败都只淘汰当前候选。
+     * 负载、温度和功耗不参与这里的判定。
      */
-    private fun createRuntimeModel(context: Context): RuntimeModel {
+    private fun createRuntimeModel(context: Context, requestedTier: YoloModelTier): RuntimeModel {
         val cores = Runtime.getRuntime().availableProcessors()
         val options = Interpreter.Options().apply {
             numThreads = EngineTuningPolicy.recognitionThreads(cores)
         }
-        var lastError: Throwable? = null
-        for (file in MODEL_FILES) {
+        val failures = mutableListOf<String>()
+        for (tier in requestedTier.fallbackOrder()) {
             var candidate: Interpreter? = null
             try {
-                candidate = Interpreter(loadModel(context, file), options)
+                val model = loadModel(context, tier.fileName)
+                candidate = Interpreter(model, options)
                 // 提前分配真实张量：把不兼容的模型/算子在启动阶段淘汰，
                 // 不让第一次实战推理才暴露 native prepare 错误。
                 candidate.allocateTensors()
-                val inputShape = candidate.getInputTensor(0).shape()
-                val outputShape = candidate.getOutputTensor(0).shape()
-                require(inputShape.contentEquals(intArrayOf(1, 640, 640, 3))) {
-                    "$file input shape ${inputShape.contentToString()} is not NHWC 640"
+                val inputTensor = candidate.getInputTensor(0)
+                val outputTensor = candidate.getOutputTensor(0)
+                val inputShape = inputTensor.shape()
+                val outputShape = outputTensor.shape()
+                require(inputShape.contentEquals(MODEL_INPUT_SHAPE)) {
+                    "输入形状 ${inputShape.contentToString()}，需要 ${MODEL_INPUT_SHAPE.contentToString()}"
                 }
-                require(outputShape.contentEquals(intArrayOf(1, 25200, 20))) {
-                    "$file output shape ${outputShape.contentToString()} is not YOLO XQ"
+                require(outputShape.contentEquals(MODEL_OUTPUT_SHAPE)) {
+                    "输出形状 ${outputShape.contentToString()}，需要 ${MODEL_OUTPUT_SHAPE.contentToString()}"
                 }
-                Log.i(TAG, "yolo model ready: $file input=${inputShape.contentToString()} output=${outputShape.contentToString()}")
-                return RuntimeModel(candidate, file)
+                require(inputTensor.dataType() == DataType.FLOAT32) {
+                    "输入类型 ${inputTensor.dataType()}，需要 FLOAT32"
+                }
+                require(outputTensor.dataType() == DataType.FLOAT32) {
+                    "输出类型 ${outputTensor.dataType()}，需要 FLOAT32"
+                }
+                // 受控零输入探测：兼容性包含必要算子是否能真正执行，不能只看 allocateTensors。
+                val probeInput = ByteBuffer.allocateDirect(MODEL_INPUT_BYTES)
+                    .order(ByteOrder.nativeOrder())
+                val probeOutput = Array(1) {
+                    Array(YoloPostprocessor.ANCHORS) { FloatArray(YoloPostprocessor.DIMS) }
+                }
+                candidate.run(probeInput, probeOutput)
+                Log.i(TAG, "yolo model ready: tier=${tier.name} file=${tier.fileName} " +
+                    "input=${inputShape.contentToString()} output=${outputShape.contentToString()}")
+                return RuntimeModel(
+                    interpreter = candidate,
+                    tier = tier,
+                    file = tier.fileName,
+                    selectionResult = YoloModelSelectionResult(
+                        requested = requestedTier,
+                        actual = tier,
+                        modelFile = tier.fileName,
+                        failureReasons = failures.toList(),
+                    ),
+                )
             } catch (t: Throwable) {
-                lastError = t
-                Log.w(TAG, "yolo model unavailable: $file", t)
+                val reason = describeCompatibilityFailure(t)
+                failures += "${tier.displayName}：$reason"
+                Log.w(TAG, "yolo model unavailable: tier=${tier.name} file=${tier.fileName}; $reason", t)
                 runCatching { candidate?.close() }
             }
         }
-        throw IllegalStateException("没有可用的象棋识别模型", lastError)
+        val selection = YoloModelSelectionResult(
+            requested = requestedTier,
+            actual = null,
+            modelFile = null,
+            failureReasons = failures,
+            fatalReason = "已按${requestedTier.fallbackOrder().joinToString("→") { it.displayName }}顺序检查，但所有候选均未通过",
+        )
+        throw YoloModelUnavailableException(selection)
+    }
+
+    private fun describeCompatibilityFailure(t: Throwable): String {
+        val message = t.message?.replace(Regex("\\s+"), " ")?.trim().orEmpty()
+        val name = t::class.java.simpleName.ifBlank { "运行时异常" }
+        return if (message.isBlank()) name else "$name：${message.take(180)}"
     }
 
     /**
@@ -147,30 +201,78 @@ class YoloBoardDetector(context: Context) {
             classMarginMin = 0.05,
         )
         // 裁剪坐标 -> 帧坐标
-        val shifted0 = if (cx0 == 0 && cy0 == 0) dets
-        else dets.map {
-            YoloDetection(it.labelId, it.score, it.cx + cx0, it.cy + cy0, it.w, it.h, it.alternatives)
-        }
-        // 排除区（悬浮窗面板）：面板上的棋子图样不属于真实棋局，必须剔除，
-        // 否则会凭空多出/错位若干子，让识别结果不可用
-        val shifted = if (exclude == null) shifted0 else shifted0.filterNot { d ->
-            val x0 = exclude[0].toDouble(); val y0 = exclude[1].toDouble()
-            val x1 = exclude[2].toDouble(); val y1 = exclude[3].toDouble()
-            d.cx >= x0 && d.cx <= x1 && d.cy >= y0 && d.cy <= y1
-        }
-        val mapped = DetectionBoardMapper.map(
+        val shifted0 = shiftToFrame(dets, cx0, cy0)
+        val shifted = excludeDetections(shifted0, exclude)
+        var mapped = DetectionBoardMapper.map(
             shifted, frame.width, frame.height, anchor = anchor,
             preferAnchor = cropHint != null && anchor != null,
         )
+        var criticalRecoveryUsed = false
+
+        // 皮肤或装饰差异可能让帅/将的置信度短暂跌过普通门槛。
+        // 仅在严格结果缺王时，对同一模型输出做一次较宽松的重解码；
+        // rescue 结果仍必须包含双王、通过基础结构校验，不能用旧棋面补子。
+        if (mapped == null || !hasBothKings(mapped.canonical)) {
+            val rescue = YoloPostprocessor.decode(
+                output[0], lb, cw, ch,
+                confThreshold = CRITICAL_RECOVERY_CONF_THRESHOLD,
+                aspectMin = 0.50,
+                aspectMax = 1.60,
+                sizeMinFactor = 0.40,
+                sizeMaxFactor = 2.00,
+                classMarginMin = 0.02,
+            )
+            val rescueMapped = DetectionBoardMapper.map(
+                excludeDetections(shiftToFrame(rescue, cx0, cy0), exclude),
+                frame.width, frame.height, anchor = anchor,
+                preferAnchor = cropHint != null && anchor != null,
+            )
+            val strictPieceCount = mapped?.pieceCount ?: -1
+            if (isSafeRecoveredBoard(rescueMapped) &&
+                rescueMapped != null && rescueMapped.pieceCount >= strictPieceCount
+            ) {
+                mapped = rescueMapped
+                criticalRecoveryUsed = true
+            }
+        }
+
         lastInferMs = inferMs
         lastPieceDets = shifted.count { !it.isBoard }
         lastRawDets = shifted0.size
         Log.d(TAG, "yolo: infer=${inferMs}ms crop=${cw}x$ch dets=${dets.size} " +
             "pieces=${mapped?.pieceCount ?: 0} avg=${mapped?.avgScore?.let { "%.2f".format(it) }} " +
-            "dropped=${mapped?.dropped ?: 0} anchor=${mapped?.anchorSource ?: "-"}")
+            "dropped=${mapped?.dropped ?: 0} anchor=${mapped?.anchorSource ?: "-"} " +
+            "criticalRecovery=$criticalRecoveryUsed")
         return mapped
     }
 
+    private fun shiftToFrame(dets: List<YoloDetection>, cx0: Int, cy0: Int): List<YoloDetection> =
+        if (cx0 == 0 && cy0 == 0) dets else dets.map {
+            YoloDetection(it.labelId, it.score, it.cx + cx0, it.cy + cy0, it.w, it.h, it.alternatives)
+        }
+
+    private fun excludeDetections(dets: List<YoloDetection>, exclude: IntArray?): List<YoloDetection> {
+        if (exclude == null) return dets
+        val x0 = exclude[0].toDouble(); val y0 = exclude[1].toDouble()
+        val x1 = exclude[2].toDouble(); val y1 = exclude[3].toDouble()
+        return dets.filterNot { d -> d.cx >= x0 && d.cx <= x1 && d.cy >= y0 && d.cy <= y1 }
+    }
+
+    private fun hasBothKings(board: Array<IntArray>): Boolean {
+        var red = 0
+        var black = 0
+        for (row in board) for (piece in row) {
+            if (piece == com.xiangqi.assist.gamelogic.Piece.WSHUAI) red++
+            if (piece == com.xiangqi.assist.gamelogic.Piece.BJIANG) black++
+        }
+        return red == 1 && black == 1
+    }
+
+    private fun isSafeRecoveredBoard(mapped: DetectionBoardMapper.MappedBoard?): Boolean {
+        if (mapped == null || !hasBothKings(mapped.canonical)) return false
+        return AssistBoard.validate(mapped.canonical).isEmpty() &&
+            AssistBoard.invalidPiecePlacement(mapped.canonical) == null
+    }
     /** 最近一次推理耗时（毫秒），诊断用 */
     @Volatile var lastInferMs: Long = 0
         private set
@@ -249,10 +351,11 @@ class YoloBoardDetector(context: Context) {
 
     companion object {
         private const val TAG = "AssistService"
-        /** 主模型：VinXiangQi v1.4.0 中模型转换得到的 FP32 激活 TFLite。 */
-        const val MODEL_FILE = "yolov5m_xq_fp32.tflite"
-        /** 设备无法分配主模型时的兼容回退模型。 */
-        const val FALLBACK_MODEL_FILE = "yolov5n_xq_fp16.tflite"
-        private val MODEL_FILES = listOf(MODEL_FILE, FALLBACK_MODEL_FILE)
+        /** 兼容性探测要求与生产推理输入/输出保持同一类型契约。 */
+        private const val MODEL_INPUT_BYTES = 4 * 3 * YoloPostprocessor.MODEL_INPUT * YoloPostprocessor.MODEL_INPUT
+        private val MODEL_INPUT_SHAPE = intArrayOf(1, 640, 640, 3)
+        private val MODEL_OUTPUT_SHAPE = intArrayOf(1, 25200, 20)
+        /** 关键棋子救援只降低置信度门槛，不改变正常帧的严格门槛。 */
+        private const val CRITICAL_RECOVERY_CONF_THRESHOLD = 0.30
     }
 }

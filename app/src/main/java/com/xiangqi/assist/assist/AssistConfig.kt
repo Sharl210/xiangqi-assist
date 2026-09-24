@@ -222,6 +222,18 @@ class AssistConfig(context: Context) {
         get() = sp.getInt(KEY_HASH_MB, DEFAULT_HASH_MB)
         set(value) { sp.edit().putInt(KEY_HASH_MB, value).commit() }
 
+    /**
+     * YOLO 识别模型档位。新安装默认大型；用户选择和设备兼容性回退后的实际档位都会记住。
+     * 回退只由模型能否加载/分配/执行决定，不读取瞬时负载、温度或功耗。
+     */
+    var yoloModelTier: YoloModelTier
+        get() = YoloModelTier.fromStored(
+            sp.getString(KEY_YOLO_MODEL_TIER, YoloModelTier.DEFAULT_NAME)
+        )
+        set(value) {
+            sp.edit().putString(KEY_YOLO_MODEL_TIER, value.name).apply()
+        }
+
     /** 识别容错：允许候选局面间的少量格差（0=逐格全等，1=容忍单格抖动）。默认 1，显著降低"一直识别不到" */
     var matchTolerance: Int
         get() = sp.getInt(KEY_TOLERANCE, 1).coerceIn(0, 2)
@@ -308,6 +320,7 @@ class AssistConfig(context: Context) {
         private const val KEY_MY_SIDE_RED = "my_side_red"
         const val DEFAULT_HASH_MB = 512
         private const val KEY_HASH_MB = "hash_mb"
+        private const val KEY_YOLO_MODEL_TIER = "yolo_model_tier"
         private const val KEY_THINK_TIME = "think_time_ms"
         private const val KEY_OPP_THINK = "opponent_think_ms"
         private const val KEY_THREADS = "engine_threads"
