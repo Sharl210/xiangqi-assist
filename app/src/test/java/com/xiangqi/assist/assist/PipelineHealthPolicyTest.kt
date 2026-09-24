@@ -154,7 +154,7 @@ class PipelineHealthPolicyTest {
             streamStartedAt = start, captureStartedAt = start,
             lastStableAt = start, lastVisionAt = start, lastRecognitionCompletedAt = start,
             lastCaptureKickAt = start + PipelineHealthPolicy.STREAM_FRAME_STALL_MS - 1L)
-        assertEquals(PipelineHealthPolicy.Action.NONE, PipelineHealthPolicy.evaluate(h))
+        assertEquals(PipelineHealthPolicy.Action.RESET_VISION, PipelineHealthPolicy.evaluate(h))
         assertEquals(PipelineHealthPolicy.Action.REBUILD_CAPTURE,
             PipelineHealthPolicy.evaluate(h.copy(now = start + PipelineHealthPolicy.STREAM_FRAME_STALL_MS + 1L,
                 lastRecoveryAt = 0L)))
@@ -169,7 +169,18 @@ class PipelineHealthPolicyTest {
         assertEquals(PipelineHealthPolicy.Action.NONE, PipelineHealthPolicy.evaluate(h))
     }
 
-    @Test fun `stable-window timeout and vision timeout obey separate thresholds`() {
+    @Test fun `a released stable window stays healthy while samples continue to be processed`() {
+        val now = 100_000L
+        val h = base(
+            now = now,
+            lastStableAt = now - 10_000L,
+            lastVisionAt = now - 9_000L,
+            lastRecognitionCompletedAt = now - 9_000L,
+            lastProcessedSampleAt = now,
+        )
+        assertEquals(PipelineHealthPolicy.Action.NONE, PipelineHealthPolicy.evaluate(h))
+    }
+    @Test fun `stable and vision stalls recover after their halved deadlines`() {
         val start = 100_000L
         val stableNow = start + PipelineHealthPolicy.STREAM_STABLE_STALL_MS - 1L
         val healthy = base(now = stableNow,

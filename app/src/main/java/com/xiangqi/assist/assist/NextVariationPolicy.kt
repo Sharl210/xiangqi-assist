@@ -21,6 +21,54 @@ object NextVariationPolicy {
     /** Toggle the stored next-move intent; a second tap cancels it. */
     fun toggleArmed(current: Boolean): Boolean = !current
 
+    /**
+     * A one-candidate user setting still needs two engine lines while a variation is armed.
+     * This is runtime-only: the persisted candidate-count setting is never changed.
+     */
+    const val TEMPORARY_CANDIDATE_COUNT = 2
+
+    fun effectiveCandidateCount(
+        configuredCount: Int,
+        variationArmed: Boolean,
+        myTurn: Boolean,
+    ): Int {
+        val configured = configuredCount.coerceIn(
+            ThinkingOptions.MIN_CANDIDATE_COUNT,
+            ThinkingOptions.MAX_CANDIDATE_COUNT,
+        )
+        return if (usesTemporaryBudget(configured, variationArmed, myTurn)) {
+            TEMPORARY_CANDIDATE_COUNT
+        } else {
+            configured
+        }
+    }
+
+    fun usesTemporaryBudget(
+        configuredCount: Int,
+        variationArmed: Boolean,
+        myTurn: Boolean,
+    ): Boolean {
+        val configured = configuredCount.coerceIn(
+            ThinkingOptions.MIN_CANDIDATE_COUNT,
+            ThinkingOptions.MAX_CANDIDATE_COUNT,
+        )
+        return variationArmed && myTurn && configured == ThinkingOptions.MIN_CANDIDATE_COUNT
+    }
+
+    fun needsTemporaryCandidate(
+        configuredCount: Int,
+        variationArmed: Boolean,
+        myTurn: Boolean,
+        availableCandidates: Int,
+    ): Boolean {
+        val configured = configuredCount.coerceIn(
+            ThinkingOptions.MIN_CANDIDATE_COUNT,
+            ThinkingOptions.MAX_CANDIDATE_COUNT,
+        )
+        return variationArmed && myTurn && configured == ThinkingOptions.MIN_CANDIDATE_COUNT &&
+            availableCandidates < TEMPORARY_CANDIDATE_COUNT
+    }
+
     /** Register or advance a request. The service may create it before candidates exist. */
     fun request(
         position: String,

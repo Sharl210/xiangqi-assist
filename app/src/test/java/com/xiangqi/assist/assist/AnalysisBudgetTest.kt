@@ -83,6 +83,22 @@ class AnalysisBudgetTest {
     }
 
     @Test
+    fun `temporary variation total mode doubles the original single candidate time`() {
+        val budget = AnalysisBudget.forEqualizedTotalTime(3_000, candidates = 2).normalized()
+        assertEquals(2, budget.candidateCount)
+        assertEquals(6_000, budget.totalTimeMs)
+        assertEquals("go movetime 6000", budget.goCommand())
+        assertEquals("2条 · 每候选 3s（总计 6s）", budget.statusLabel())
+    }
+
+    @Test
+    fun `temporary variation supports the extended total ceiling without changing normal total mode`() {
+        val temporary = AnalysisBudget.forEqualizedTotalTime(240_000, candidates = 2).normalized()
+        assertEquals(480_000, temporary.totalTimeMs)
+        assertEquals("go movetime 480000", temporary.goCommand())
+        assertEquals(240_000, AnalysisBudget.forTotalTime(240_000, candidates = 1).normalized().totalTimeMs)
+    }
+    @Test
     fun `depth status label uses the submitted depth budget`() {
         val budget = AnalysisBudget.forDepth(20, candidates = 1).normalized()
         assertEquals("深度 20 · 1条共享", budget.statusLabel())

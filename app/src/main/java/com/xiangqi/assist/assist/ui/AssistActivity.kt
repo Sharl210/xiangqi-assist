@@ -31,6 +31,8 @@ import com.xiangqi.assist.assist.AssistConfig
 import com.xiangqi.assist.assist.AssistRunControlPolicy
 import com.xiangqi.assist.assist.EngineTuningPolicy
 import com.xiangqi.assist.assist.ScreenAssistService
+import com.xiangqi.assist.assist.SideSelectionMode
+import com.xiangqi.assist.assist.SideSelectionPolicy
 import com.xiangqi.assist.assist.YoloModelTier
 import com.xiangqi.assist.assist.access.AssistAccessibilityService
 import com.xiangqi.assist.assist.access.RootHelper
@@ -64,6 +66,8 @@ class AssistActivity : AppCompatActivity() {
     private lateinit var btnAccessibility: Button
     private lateinit var btnRootEnable: Button
     private lateinit var btnAutoPlay: Button
+    private lateinit var sideModeSwitch: com.google.android.material.materialswitch.MaterialSwitch
+    private lateinit var tvSideHint: TextView
     private lateinit var btnMoveGesture: Button
     private lateinit var btnEngineThreads: Button
     private lateinit var btnYoloModel: Button
@@ -163,6 +167,8 @@ class AssistActivity : AppCompatActivity() {
         btnAccessibility = findViewById(R.id.btn_accessibility)
         btnRootEnable = findViewById(R.id.btn_root_enable)
         btnAutoPlay = findViewById(R.id.btn_auto_play)
+        sideModeSwitch = findViewById(R.id.switch_side_mode)
+        tvSideHint = findViewById(R.id.tv_side_hint)
         btnMoveGesture = findViewById(R.id.btn_move_gesture)
         btnEngineThreads = findViewById(R.id.btn_engine_threads)
         btnYoloModel = findViewById(R.id.btn_yolo_model)
@@ -212,6 +218,18 @@ class AssistActivity : AppCompatActivity() {
         // root 路径：直接写系统设置的启用列表（等价于手动勾选）
         btnRootEnable.setOnClickListener { enableViaRoot() }
         btnAutoPlay.setOnClickListener { toggleAutoPlay() }
+        sideModeSwitch.setOnCheckedChangeListener { _, checked ->
+            val mode = if (checked) SideSelectionMode.AUTO else SideSelectionMode.MANUAL
+            val svc = service
+            if (svc != null) {
+                svc.requestSideSelectionMode(mode)
+            } else {
+                AssistConfig(this).sideSelectionMode = mode
+            }
+            statusHandler.postDelayed({
+                if (!isFinishing && !isDestroyed) refreshStatus()
+            }, 120L)
+        }
         btnMoveGesture.setOnClickListener { toggleMoveGesture() }
         btnEngineThreads.setOnClickListener { cycleEngineThreads() }
         btnYoloModel.setOnClickListener { showYoloModelChooser() }
@@ -623,6 +641,32 @@ class AssistActivity : AppCompatActivity() {
         btnAutoPlay.backgroundTintList = ColorStateList.valueOf(
             ContextCompat.getColor(this, if (autoOn) R.color.brand_green_600 else R.color.brand_navy_700)
         )
+
+        val sideCfg = AssistConfig(this)
+        val sideMode = svc?.sideSelectionMode() ?: sideCfg.sideSelectionMode
+        val effectiveSideRed = svc?.effectiveSideRed() ?: SideSelectionPolicy.effectiveSideRed(
+            sideMode,
+            sideCfg.mySideRed,
+            sideCfg.autoSideRed,
+        )
+        sideModeSwitch.setOnCheckedChangeListener(null)
+        sideModeSwitch.isChecked = sideMode == SideSelectionMode.AUTO
+        sideModeSwitch.text = if (sideMode == SideSelectionMode.AUTO) "自动检测执子方" else "手动选择执子方"
+        sideModeSwitch.setOnCheckedChangeListener { _, checked ->
+            val mode = if (checked) SideSelectionMode.AUTO else SideSelectionMode.MANUAL
+            service?.requestSideSelectionMode(mode) ?: run { AssistConfig(this).sideSelectionMode = mode }
+            refreshStatus()
+        }
+        val sideReady = svc?.isAutoSideDetectionReady() == true
+        tvSideHint.text = if (sideMode == SideSelectionMode.AUTO) {
+            if (sideReady) {
+                "自动检测当前己方：${if (effectiveSideRed) "红方" else "黑方"}；只依据屏幕下半区帅/将的颜色；异常棋面会拒绝并重新识别，面板按钮不可手动点击"
+            } else {
+                "自动执子方等待稳定有效棋面；检测锚点仅为屏幕下半区帅/将，异常棋面不会猜测或覆盖自动记忆"
+            }
+        } else {
+            "手动记忆当前己方：${if (effectiveSideRed) "红方" else "黑方"}；切换到自动后将使用另一套独立记忆"
+        }
 
         val gesture = AssistConfig(this).autoPlayGesture
         btnMoveGesture.text = if (gesture == AssistConfig.GESTURE_TAP) {

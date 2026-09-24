@@ -142,6 +142,23 @@
                 android:text="自动走子"
                 android:textAllCaps="false" />
 
+            <com.google.android.material.materialswitch.MaterialSwitch
+                android:id="@+id/switch_side_mode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="手动选择执子方"
+                android:textColor="@color/brand_text_primary"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/tv_side_hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:textColor="@color/brand_text_secondary"
+                android:textSize="12sp" />
+
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/btn_move_gesture"
                 style="@style/Widget.XiangqiAssist.Button.Quiet"

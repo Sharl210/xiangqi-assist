@@ -4,8 +4,8 @@ import com.xiangqi.assist.gamelogic.Piece
 
 /** 棋子类别（车/马/象/兵/卒等）的时序一致性规则。 */
 object PieceIdentityPolicy {
-    /** 同一格棋子类别变化需要的连续一致帧数；抑制车↔卒↔象的短时抖动。 */
-    const val CLASS_CHANGE_CONFIRM_FRAMES = 6
+    /** 同一格类别变化必须重新得到完整稳定窗口，不能用错误类别连续多帧污染已确认棋面。 */
+    const val CLASS_CHANGE_CONFIRM_FRAMES = FrameStabilityPolicy.REQUIRED_STABLE_FRAMES
 
     /** 两个盘面中“格子仍有子，但类别或阵营变了”的数量。 */
     fun replacementCount(a: Array<IntArray>, b: Array<IntArray>): Int {

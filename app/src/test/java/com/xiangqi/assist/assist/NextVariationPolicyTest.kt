@@ -12,6 +12,48 @@ class NextVariationPolicyTest {
         assertFalse(NextVariationPolicy.toggleArmed(true))
     }
 
+    @Test fun `single configured candidate expands only while armed on our turn`() {
+        assertEquals(
+            2,
+            NextVariationPolicy.effectiveCandidateCount(
+                configuredCount = 1,
+                variationArmed = true,
+                myTurn = true,
+            )
+        )
+        assertEquals(
+            1,
+            NextVariationPolicy.effectiveCandidateCount(
+                configuredCount = 1,
+                variationArmed = true,
+                myTurn = false,
+            )
+        )
+        assertEquals(
+            1,
+            NextVariationPolicy.effectiveCandidateCount(
+                configuredCount = 1,
+                variationArmed = false,
+                myTurn = true,
+            )
+        )
+    }
+
+    @Test fun `temporary budget applies only to armed single-candidate own turn`() {
+        assertTrue(NextVariationPolicy.usesTemporaryBudget(1, variationArmed = true, myTurn = true))
+        assertFalse(NextVariationPolicy.usesTemporaryBudget(1, variationArmed = false, myTurn = true))
+        assertFalse(NextVariationPolicy.usesTemporaryBudget(1, variationArmed = true, myTurn = false))
+        assertFalse(NextVariationPolicy.usesTemporaryBudget(2, variationArmed = true, myTurn = true))
+    }
+
+    @Test fun `temporary candidate is requested only when the second line is absent`() {
+        assertTrue(NextVariationPolicy.needsTemporaryCandidate(1, true, true, 0))
+        assertTrue(NextVariationPolicy.needsTemporaryCandidate(1, true, true, 1))
+        assertFalse(NextVariationPolicy.needsTemporaryCandidate(1, true, true, 2))
+        assertFalse(NextVariationPolicy.needsTemporaryCandidate(2, true, true, 1))
+        assertFalse(NextVariationPolicy.needsTemporaryCandidate(1, true, false, 1))
+    }
+
     @Test fun `no alternative remains pending until new candidate arrives`() {
         val request = NextVariationPolicy.request("fen", "a0a1", listOf("a0a1"), null)
         assertNull(request.preferredUcci)

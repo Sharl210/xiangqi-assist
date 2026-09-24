@@ -470,14 +470,51 @@ class ScreenAssistService : Service() {
     /** 当前工作模式（供辅助页显示）：MODE_GUIDE / MODE_SEMI / MODE_MANUAL / MODE_AUTO */
     fun currentWorkMode(): Int = currentMode()
 
-    /** 由辅助页切换工作模式（三态互斥）；内部转到主线程执行 */
-    fun requestWorkMode(mode: Int) {
-        mainHandler.post { setMode(mode) }
+    /** 由辅助页切换执子方来源；两套执子方记忆不互相覆盖。 */
+    fun requestSideSelectionMode(mode: SideSelectionMode) {
+        mainHandler.post {
+            if (config.sideSelectionMode == mode) return@post
+            config.sideSelectionMode = mode
+            val detected = if (mode == SideSelectionMode.AUTO) {
+                tracker.confirmed?.screenRaw?.let(SideSelectionPolicy::detectAutoSideRed)
+            } else {
+                null
+            }
+            autoSideDetectionReady = mode == SideSelectionMode.AUTO && detected != null
+            if (detected != null) {
+                if (config.autoSideRed != detected) config.autoSideRed = detected
+            }
+            stopCurrentSearch()
+            resetSuggestionState(newAnalysisCycle = true)
+            autoLastUcci = null
+            val modeStatus = when (mode) {
+                SideSelectionMode.AUTO -> if (detected != null) {
+                    "已切换为自动检测执子方：屏幕下半区判为${if (detected) "红方" else "黑方"}；手动记忆仍保留"
+                } else {
+                    "已切换为自动检测执子方：等待稳定有效棋面后依据下半区帅/将判定；手动记忆仍保留"
+                }
+                SideSelectionMode.MANUAL ->
+                    "已切换为手动执子方：当前${if (config.mySideRed) "红方" else "黑方"}；自动记忆仍保留"
+            }
+            setStatus(modeStatus)
+            if (!paused && currentFen.isNotEmpty() && (mode == SideSelectionMode.MANUAL || detected != null)) {
+                scheduleAnalysis()
+            }
+            postRender()
+        }
     }
+
+    fun sideSelectionMode(): SideSelectionMode = config.sideSelectionMode
+
+    fun isAutoSideDetectionReady(): Boolean =
+        config.sideSelectionMode != SideSelectionMode.AUTO || autoSideDetectionReady
+
+    fun effectiveSideRed(): Boolean = mySideIsRed()
 
     fun requestAutoPlay(on: Boolean) {
         mainHandler.post { setAutoPlayByUser(on) }
     }
+
 
     /** 用户明确操作自动走子开关的唯一写入口。系统故障恢复不得调用关闭分支。 */
     private fun setAutoPlayByUser(on: Boolean) {
@@ -895,6 +932,8 @@ class ScreenAssistService : Service() {
     /** 当前确认局面的 canonical 棋盘（开局库查询用） */
     @Volatile private var currentCanonical: Array<IntArray>? = null
     private var currentOrientation = Orientation.STANDARD
+    /** true only after a valid stable screen board produced the current automatic king-side result. */
+    @Volatile private var autoSideDetectionReady = false
     private var lastAnalysis: AnalysisResult? = null
     private var selectedCandidate = 0
     @Volatile private var nextVariationRequest: NextVariationPolicy.Request? = null
@@ -1186,10 +1225,24 @@ class ScreenAssistService : Service() {
     private fun projectionStillUsable(): Boolean =
         mediaProjection != null && virtualDisplay != null && mediaProjectionCallback != null
 
-    /** 前台应用全屏基准；只由无障碍窗口事件更新。 */
+    /** 前台应用全屏基准；只由稳定确认后的无障碍窗口观察更新。 */
     @Volatile private var foregroundBaselinePackage: String? = null
+    @Volatile private var foregroundWindowStabilityState = ForegroundWindowStabilityPolicy.State()
     @Volatile private var foregroundPauseSnapshot: ForegroundPausePolicy.Snapshot? = null
     @Volatile private var foregroundLastEventAt = 0L
+
+    /**
+     * 无障碍事件不保证每一帧都回调；周期性查询当前全屏 application window，
+     * 让前台切换确认与录屏的八样本稳定门保持同一节奏。
+     */
+    private val foregroundProbe = object : Runnable {
+        override fun run() {
+            if (!stopping && !overlayClosed) {
+                AssistAccessibilityService.instance?.reportCurrentForegroundWindow()
+                mainHandler.postDelayed(this, FrameStabilityPolicy.SAMPLE_PERIOD_MS)
+            }
+        }
+    }
 
     /**
      * **建议所依据的盘面**：提交给引擎计算时的那份快照。
@@ -1332,6 +1385,8 @@ class ScreenAssistService : Service() {
         AssistAccessibilityService.setGlobalForegroundObserver { pkg, full ->
             mainHandler.post { onForegroundWindowEvent(pkg, full) }
         }
+        mainHandler.removeCallbacks(foregroundProbe)
+        mainHandler.post(foregroundProbe)
         AssistAccessibilityService.instance?.reportCurrentForegroundWindow()
         tracker = BoardTracker(confirmCount = 1)
         // 强度档位与持久化设置对齐（设置值不在档位表内时用”标准”）
@@ -1483,6 +1538,7 @@ class ScreenAssistService : Service() {
         }
         if (!resumingPreparedSession) {
             foregroundBaselinePackage = null
+             foregroundWindowStabilityState = ForegroundWindowStabilityPolicy.State()
             foregroundPauseSnapshot = null
             pendingCaptureGrant = null
             resumeCaptureWhenTargetReturns = false
@@ -1611,7 +1667,8 @@ class ScreenAssistService : Service() {
                     )
                 )
                 it.setThinkTime(config.thinkTimeMs)
-                // 多条候选共享同一个 go 的总时间/深度预算；“变招”只改变下一手选择，不启动新搜索。
+                // 多条候选共享同一个 go 的总时间/深度预算；变招临时扩展只在实际
+                // 当前局面提交分析预算时生效，不改变初始化时的用户设置。
                 it.setMultiPv(config.candidateCount)
             }
         if (resumingPreparedSession && resumeIntent != CaptureResumeIntent.NONE) {
@@ -1784,29 +1841,38 @@ class ScreenAssistService : Service() {
         lastStreamPhase = null
     }
 
-    /** 由无障碍窗口事件调用；只处理全屏应用候选，浮窗/系统层由策略过滤。 */
+    /** 由无障碍窗口事件调用；只有连续八个稳定观察样本才提交前台切换。 */
     private fun onForegroundWindowEvent(packageName: String?, isFullScreen: Boolean) {
         if (stopping || overlayClosed) return
         foregroundLastEventAt = System.currentTimeMillis()
-        when (val decision = ForegroundAppPolicy.observe(
+        val observed = ForegroundWindowStabilityPolicy.observe(
             ownerPackage = packageNameForForegroundOwner(),
-            baselinePackage = foregroundBaselinePackage,
+            state = foregroundWindowStabilityState,
             packageName = packageName,
             isFullScreen = isFullScreen,
-        )) {
-            ForegroundAppPolicy.Decision.IGNORE -> Unit
-            is ForegroundAppPolicy.Decision.BASELINE -> {
-                foregroundBaselinePackage = decision.packageName
-                trace("FOREGROUND_BASELINE", "package=${decision.packageName}")
+        )
+        foregroundWindowStabilityState = observed.state
+        when (val decision = observed.decision) {
+            ForegroundWindowStabilityPolicy.Decision.IGNORE -> Unit
+            is ForegroundWindowStabilityPolicy.Decision.PENDING -> {
+                trace(
+                    "FOREGROUND_PENDING",
+                    "package=${decision.packageName} frames=${decision.frames}/${decision.required} " +
+                        "stable=${foregroundWindowStabilityState.stablePackage}",
+                )
             }
-            is ForegroundAppPolicy.Decision.CHANGED -> {
+            is ForegroundWindowStabilityPolicy.Decision.BASELINE -> {
+                foregroundBaselinePackage = decision.packageName
+                trace("FOREGROUND_BASELINE", "package=${decision.packageName} stableFrames=${FrameStabilityPolicy.REQUIRED_STABLE_FRAMES}")
+            }
+            is ForegroundWindowStabilityPolicy.Decision.CHANGED -> {
                 val from = decision.previous
                 foregroundBaselinePackage = decision.current
                 val snapshot = foregroundPauseSnapshot
                 if (snapshot != null && decision.current == snapshot.resumePackage) {
                     trace(
                         "FOREGROUND_RETURN",
-                        "package=${decision.current} wasRunning=${snapshot.wasRunning} suspendedByForeground=${snapshot.suspendedByForeground}"
+                        "package=${decision.current} wasRunning=${snapshot.wasRunning} suspendedByForeground=${snapshot.suspendedByForeground}",
                     )
                     if (snapshot.wasRunning && snapshot.suspendedByForeground) {
                         resumeAfterForegroundReturn(decision.current)
@@ -1827,16 +1893,22 @@ class ScreenAssistService : Service() {
                         foregroundPauseSnapshot = captured
                         trace(
                             "FOREGROUND_SWITCH_PAUSE",
-                            "from=$from to=${decision.current} wasRunning=${captured.wasRunning}"
+                            "from=$from to=${decision.current} wasRunning=${captured.wasRunning} stableFrames=${FrameStabilityPolicy.REQUIRED_STABLE_FRAMES}",
                         )
                         if (captured.wasRunning) {
                             pauseForForegroundSwitch(decision.current)
+                        } else {
+                            // 切出前本来就是暂停态：不启动识别，只记录恢复目标，
+                            // 返回后再次确认暂停状态，不能自动变成运行态。
+                            setStatus("检测到前台应用已切换（$from → ${decision.current}）\n保持切出前的暂停状态；返回原应用后仍保持暂停")
+                            postRender()
                         }
                     }
                 }
             }
         }
     }
+
 
     private fun packageNameForForegroundOwner(): String = packageName
 
@@ -1961,6 +2033,7 @@ class ScreenAssistService : Service() {
         beginVisionEpoch()
         if (rebaseBoard) {
             resumeRebasePending = true
+            autoSideDetectionReady = false
             tracker.reset(currentRedGo)
             currentCanonical = null
             currentPieces = null
@@ -1989,6 +2062,7 @@ class ScreenAssistService : Service() {
         kickCapture(forceProcess = true)
         if (userInitiated) {
             foregroundBaselinePackage = null
+             foregroundWindowStabilityState = ForegroundWindowStabilityPolicy.State()
             foregroundPauseSnapshot = null
             pendingCaptureGrant = null
             resumeCaptureWhenTargetReturns = false
@@ -2276,16 +2350,15 @@ class ScreenAssistService : Service() {
     }
 
     /**
-     * 中国象棋的被将状态可以直接确定当前轮次：被攻击的一方必须走；
-     * 以用户指定的己方颜色解释“我方/对方”，不使用屏幕上下位置。
+     * 中国象棋中，被将的一方必须走。此推断直接看红帅/黑将各自是否受攻，
+     * 与手动/自动执子方设置无关，避免执子方切换前的旧记忆干扰合法性判断。
      */
     private fun forcedTurnFromCheck(board: Array<IntArray>): Boolean? {
-        val myRed = mySideIsRed()
-        val myChecked = AssistBoard.kingAttacked(board, myRed)
-        val opponentChecked = AssistBoard.kingAttacked(board, !myRed)
+        val redChecked = AssistBoard.kingAttacked(board, red = true)
+        val blackChecked = AssistBoard.kingAttacked(board, red = false)
         return when {
-            myChecked && !opponentChecked -> myRed
-            opponentChecked && !myChecked -> !myRed
+            redChecked && !blackChecked -> true
+            blackChecked && !redChecked -> false
             else -> null
         }
     }
@@ -2358,6 +2431,7 @@ class ScreenAssistService : Service() {
     private fun recognizeFrame(
         frame: Frame,
         epoch: Long,
+        relaxedRecovery: Boolean = false,
     ): DetectionObservation? {
         if (stopping || overlayClosed || epoch != recognitionEpoch || manualMode || (paused && !refresh.isActive)) return null
         val yolo = yoloDetector ?: return null
@@ -2366,7 +2440,7 @@ class ScreenAssistService : Service() {
         val excluded = panelRectInFrame(frame.width, frame.height)
         if (excluded != null) maskRegion(frame, excluded, LETTERBOX_GRAY)
         val mapped = try {
-            detectVision(frame, yolo, excluded)
+            detectVision(frame, yolo, excluded, relaxedRecovery = relaxedRecovery)
         } catch (t: Throwable) {
             // Java层异常不能击穿识别线程；原生SIGSEGV由生命周期闸门避免，
             // 这里负责把可恢复的TFLite错误转成当前帧无效并继续下一轮。
@@ -2390,7 +2464,7 @@ class ScreenAssistService : Service() {
         debugSaveFrameIfRequested(frame)
         val observation = recognizeFrame(frame, epoch)
         if (observation == null) {
-            // 模型没有给出可用盘面：保留滑动窗口，只把释放闸门重新打开；
+            // 模型没有给出可用棋面：保留滑动窗口，只把释放闸门重新打开；
             // 下一个125ms样本即可再次推理，不必重新等待八个样本。
             stableFrameWindow.rearm()
             trace("VISION_REJECT", "reason=unavailable epoch=$epoch phase=${refreshPhase()} misses=${yoloMissStreak + 1}")
@@ -2409,19 +2483,36 @@ class ScreenAssistService : Service() {
             return
         }
 
-        val mapped = observation.mapped
-        val canonical = observation.canonical
+
+        var mapped = observation.mapped
+        var canonical = observation.canonical
         val activeLanding = landingState
         trace(
             "VISION_RESULT",
             "pieces=${mapped.pieceCount} effectivePieces=${canonical.sumOf { row -> row.count { it != Piece.EMPTY } }} " +
                 "anchor=${mapped.anchorSource} orientation=${mapped.orientation} " +
+                "dropped=${mapped.dropped} repair=${mapped.repairNotes.joinToString(";")} " +
                 "stable=$stableFrameCount landing=${activeLanding?.stage}"
         )
-        val unsafe = if (activeLanding != null) {
+        var unsafe: String? = if (activeLanding != null) {
             landingFrameStructuralProblem(canonical, activeLanding)
         } else {
             structuralProblem(canonical)
+        }
+        if (unsafe?.contains("漏子") == true && activeLanding == null) {
+            val relaxed = runCatching {
+                recognizeFrame(frame, epoch, relaxedRecovery = true)?.mapped
+            }.onFailure { Log.w(TAG, "targeted relaxed recognition failed", it) }.getOrNull()
+            if (relaxed != null && relaxed.pieceCount > mapped.pieceCount && structuralProblem(relaxed.canonical) == null) {
+                trace(
+                    "VISION_RELAXED_RECOVERY",
+                    "strictPieces=${mapped.pieceCount} recoveredPieces=${relaxed.pieceCount} " +
+                        "anchor=${relaxed.anchorSource} epoch=$epoch",
+                )
+                mapped = relaxed
+                canonical = relaxed.canonical
+                unsafe = null
+            }
         }
         if (unsafe != null) {
             // 当前关键帧被结构/缺子门拒绝；滑动窗口不清空，下一张相邻样本直接重试。
@@ -2594,6 +2685,7 @@ class ScreenAssistService : Service() {
         }
         if (requestedVariation != null && consumedVariation == null) {
             nextVariationArmed = false
+            analysisEngine?.setMultiPv(config.candidateCount)
             trace("NEXT_VARIATION_EXECUTED", "position=${landing.fen} ucci=${landing.ucci}")
         }
         nextVariationRequest = consumedVariation
@@ -2646,16 +2738,6 @@ class ScreenAssistService : Service() {
         val isLandingRebase = landingRebasePending
         val rebasePre = landingRebasePreBoard
         val rebaseExpected = landingRebaseExpectedBoard
-        var confirmedRedGo = when {
-            isLandingRebase -> rebaseTurnForObservedBoard(confirmed.canonical, rebasePre, rebaseExpected)
-            currentCanonical == null -> mySideIsRed()
-            else -> tracker.redGo
-        }
-        forcedTurnFromCheck(confirmed.canonical)?.let { forced ->
-            confirmedRedGo = forced
-            Log.i(TAG, "turn forced by check: ${if (forced == mySideIsRed()) "my side" else "opponent side"} to move")
-        }
-        // 识别在 worker 线程；所有业务状态只在主线程提交。模式/暂停若已变化，旧结果丢弃。
         mainHandler.post {
             if (epoch != recognitionEpoch) return@post
             // 重建/暂停后的首张稳定画面只建立新观察基线，不把保留的旧展示棋面
@@ -2671,6 +2753,41 @@ class ScreenAssistService : Service() {
                 )
                 return@post
             }
+
+            // 自动模式只看屏幕下半区的帅/将。它们必须唯一且恰有一个在下半区；
+            // 缺失或歧义属于坏棋面，复用异常棋面重识别流程，绝不回退猜手动颜色。
+            val detectedAutoSide = if (config.sideSelectionMode == SideSelectionMode.AUTO) {
+                SideSelectionPolicy.detectAutoSideRed(confirmed.screenRaw)
+            } else {
+                null
+            }
+            if (config.sideSelectionMode == SideSelectionMode.AUTO && detectedAutoSide == null) {
+                autoSideDetectionReady = false
+                val reason = "屏幕下半区无法唯一确认帅/将，棋面异常"
+                trace("AUTO_SIDE_REJECT", "reason=$reason redKings/blackKings=invalid epoch=$epoch")
+                tracker.reset(currentRedGo)
+                stableFrameWindow.rearm()
+                lastFailReason = reason
+                yoloMissStreak = maxOf(yoloMissStreak, 1)
+                setStatus("棋面结构异常：$reason\n拒绝当前关键帧，正在重新识别…")
+                kickCapture()
+                requestWatchdog()
+                return@post
+            }
+
+            val sideForInitialTurn = when (config.sideSelectionMode) {
+                SideSelectionMode.MANUAL -> config.mySideRed
+                SideSelectionMode.AUTO -> detectedAutoSide!!
+            }
+            var confirmedRedGo = when {
+                isLandingRebase -> rebaseTurnForObservedBoard(confirmed.canonical, rebasePre, rebaseExpected)
+                currentCanonical == null -> sideForInitialTurn
+                else -> tracker.redGo
+            }
+            forcedTurnFromCheck(confirmed.canonical)?.let { forced ->
+                confirmedRedGo = forced
+                Log.i(TAG, "turn forced by check: ${if (forced == mySideIsRed()) "my side" else "opponent side"} to move")
+            }
             val unsafe = AssistBoard.engineUnsafeReason(confirmed.canonical, confirmedRedGo)
             if (unsafe != null) {
                 // 这是当前关键帧自身的异常：只拒绝并清空跟踪候选，等待下一组录屏样本。
@@ -2683,6 +2800,18 @@ class ScreenAssistService : Service() {
                 kickCapture()
                 requestWatchdog()
                 return@post
+            }
+
+            val autoSideChanged = detectedAutoSide != null && config.autoSideRed != detectedAutoSide
+            if (detectedAutoSide != null) {
+                if (autoSideChanged) config.autoSideRed = detectedAutoSide
+                autoSideDetectionReady = true
+                if (autoSideChanged) {
+                    trace("AUTO_SIDE_DETECTED", "red=$detectedAutoSide source=screen-bottom-king")
+                    stopCurrentSearch()
+                    resetSuggestionState(newAnalysisCycle = true)
+                    setStatus("按屏幕下半区帅/将识别，自动己方为${if (detectedAutoSide) "红方" else "黑方"}")
+                }
             }
 
             boardUpdatedAt = System.currentTimeMillis()
@@ -2820,6 +2949,25 @@ class ScreenAssistService : Service() {
         if (reason.isNotEmpty()) autoLastResult = reason
     }
 
+    private fun restartAnalysisForCandidateCountChange(reason: String) {
+        if (currentFen.isEmpty() || paused || manualMode) return
+        trace("ANALYSIS_CANDIDATE_COUNT_RESET", "fen=$currentFen reason=$reason")
+        stopCurrentSearch()
+        analysisCycleGate.invalidate()
+        resetSuggestionState(newAnalysisCycle = false)
+        postRender()
+        scheduleAnalysis()
+    }
+
+    private fun restartAnalysisForTemporaryVariation() {
+        if (currentFen.isEmpty() || currentRedGo != mySideIsRed()) return
+        trace(
+            "NEXT_VARIATION_EXPAND",
+            "fen=$currentFen configured=${config.candidateCount} temporary=${NextVariationPolicy.TEMPORARY_CANDIDATE_COUNT}",
+        )
+        restartAnalysisForCandidateCountChange("variation-expand")
+    }
+
     private fun resetSuggestionState(newAnalysisCycle: Boolean = false) {
         if (newAnalysisCycle) analysisCycleGate.invalidate()
         // 变招是面向“下一次实际我方落子”的存量意图，不随分析周期或对方回合自动丢失。
@@ -2936,11 +3084,19 @@ class ScreenAssistService : Service() {
             }
             if (myTurn) {
                 val moves = queryBook(canonical, redGo)
-                if (!moves.isNullOrEmpty()) {
+                val effectiveCandidateCount = NextVariationPolicy.effectiveCandidateCount(
+                    configuredCount = config.candidateCount,
+                    variationArmed = nextVariationArmed,
+                    myTurn = true,
+                )
+                val bookSatisfiesVariation = !nextVariationArmed ||
+                    config.candidateCount != ThinkingOptions.MIN_CANDIDATE_COUNT ||
+                    (moves?.size ?: 0) >= effectiveCandidateCount
+                if (!moves.isNullOrEmpty() && bookSatisfiesVariation) {
                     analysisCycleGate.beginOrReuse(fen)
                     analyzedFen = fen
                     expectedAnalysisId = 0L
-                    bookMoves = moves.take(config.candidateCount)
+                    bookMoves = moves.take(effectiveCandidateCount)
                     searching = false
                     searchSettled = true
                     mainHandler.post { postRender() }
@@ -2968,17 +3124,27 @@ class ScreenAssistService : Service() {
             analysisCycleGate.beginOrReuse(fen)
             analyzedFen = fen
             val mode = config.thinkingMode
+            val effectiveCandidateCount = NextVariationPolicy.effectiveCandidateCount(
+                configuredCount = config.candidateCount,
+                variationArmed = nextVariationArmed,
+                myTurn = myTurn,
+            )
+            val temporaryVariationBudget = NextVariationPolicy.usesTemporaryBudget(
+                configuredCount = config.candidateCount,
+                variationArmed = nextVariationArmed,
+                myTurn = myTurn,
+            )
             val budget = if (mode == ThinkingMode.DEPTH) {
                 val depth = if (myTurn) searchDepthTarget else min(searchDepthTarget, OPPONENT_MAX_DEPTH)
                 // 深度模式只设置用户选择的深度上限；不额外塞一个人为的 movetime 截断。
                 // 引擎会自然搜索到该深度并返回 bestmove，棋力优化来自线程、Hash、预热、
                 // MultiPV共享和任务去重，而不是把搜索预算砍短后冒充“响应优化”。
-                AnalysisBudget.forDepth(depth, config.candidateCount)
+                AnalysisBudget.forDepth(depth, effectiveCandidateCount)
             } else {
                 val totalMs = if (mode == ThinkingMode.PER_CANDIDATE_TIME) {
                     ThinkingOptions.effectivePerCandidateTotal(
                         config.perCandidateTimeMs,
-                        config.candidateCount,
+                        effectiveCandidateCount,
                     )
                 } else if (myTurn) {
                     config.thinkTimeMs
@@ -2986,9 +3152,11 @@ class ScreenAssistService : Service() {
                     config.opponentThinkMs.coerceAtLeast(100)
                 }
                 if (mode == ThinkingMode.PER_CANDIDATE_TIME) {
-                    AnalysisBudget.forPerCandidateTime(config.perCandidateTimeMs, config.candidateCount)
+                    AnalysisBudget.forPerCandidateTime(config.perCandidateTimeMs, effectiveCandidateCount)
+                } else if (temporaryVariationBudget) {
+                    AnalysisBudget.forEqualizedTotalTime(config.thinkTimeMs, effectiveCandidateCount)
                 } else {
-                    AnalysisBudget.forTotalTime(totalMs, config.candidateCount)
+                    AnalysisBudget.forTotalTime(totalMs, effectiveCandidateCount)
                 }
             }
             val requestBudget = budget.normalized()
@@ -3008,10 +3176,15 @@ class ScreenAssistService : Service() {
             searching = expectedAnalysisId > 0L
             if (!searching) searchStartAt = 0L
             previewState.onContext(fen, expectedAnalysisId)
-            Log.i(TAG, "analysis request fen=$fen budget=${requestBudget.goCommand()} id=$expectedAnalysisId")
+            Log.i(
+                TAG,
+                "analysis request fen=$fen budget=${requestBudget.goCommand()} " +
+                    "candidates=${requestBudget.candidateCount} temporaryVariation=$temporaryVariationBudget id=$expectedAnalysisId",
+            )
             trace(
                 "ANALYSIS_REQUEST",
-                "id=$expectedAnalysisId fen=$fen budget=${requestBudget.goCommand()} myTurn=$myTurn"
+                "id=$expectedAnalysisId fen=$fen budget=${requestBudget.goCommand()} " +
+                    "candidates=${requestBudget.candidateCount} temporaryVariation=$temporaryVariationBudget myTurn=$myTurn"
             )
             mainHandler.post { postRender() }
             requestStatus?.let { text -> mainHandler.post { setStatus(text) } }
@@ -3279,6 +3452,7 @@ class ScreenAssistService : Service() {
         saveBallPos()
         postRender()
         setStatus("已缩成悬浮球\n点悬浮球可展开面板")
+        refreshForegroundNotification()
     }
 
     /** 把悬浮球夹回系统栏之间的可见区并保存归一化坐标。 */
@@ -3701,6 +3875,7 @@ class ScreenAssistService : Service() {
         preparedSession = false
         foregroundPauseSnapshot = null
         foregroundBaselinePackage = null
+             foregroundWindowStabilityState = ForegroundWindowStabilityPolicy.State()
         captureResumePending = false
         pendingCaptureGrant = null
         resumeCaptureWhenTargetReturns = false
@@ -3903,8 +4078,16 @@ class ScreenAssistService : Service() {
     /** 点击一次预存下一次我方变招；绿色预存态再次点击则取消，不要求用户卡在待落子阶段。 */
     private fun cycleCandidate() {
         if (nextVariationArmed) {
+            val temporaryWasActive = config.candidateCount == ThinkingOptions.MIN_CANDIDATE_COUNT &&
+                currentRedGo == mySideIsRed() &&
+                ((activeAnalysisBudget?.candidateCount ?: 0) > config.candidateCount ||
+                    (lastAnalysis?.lines?.size ?: 0) > config.candidateCount ||
+                    (bookMoves?.size ?: 0) > config.candidateCount)
             clearNextVariationRequest()
             setStatus("已取消下一手变招")
+            if (temporaryWasActive) {
+                restartAnalysisForCandidateCountChange("variation-cancel")
+            }
             postRender()
             return
         }
@@ -3924,6 +4107,18 @@ class ScreenAssistService : Service() {
             candidates = moves,
             current = current,
         )
+        if (NextVariationPolicy.needsTemporaryCandidate(
+                configuredCount = config.candidateCount,
+                variationArmed = nextVariationArmed,
+                myTurn = true,
+                availableCandidates = moves.size,
+            )
+        ) {
+            setStatus("下一手变招已预存；正在临时计算第二候选…")
+            restartAnalysisForTemporaryVariation()
+            postRender()
+            return
+        }
         val resolved = nextVariationResolution()
         if (resolved.waitingForAlternative) {
             setStatus("下一手变招已预存；等待当前局面的非默认候选（不会重新搜索）")
@@ -4120,13 +4315,18 @@ class ScreenAssistService : Service() {
         postRender()
     }
 
-    /** 切换手动指定的己方颜色；不改当前盘面走子方，只重算“我方/对方”的解释和建议。 */
+    /** 切换手动记忆的己方颜色；自动检测模式完全屏蔽此入口。 */
     private fun toggleMySide() {
+        if (config.sideSelectionMode == SideSelectionMode.AUTO) {
+            setStatus("当前为自动检测执子方，面板按钮仅显示检测结果，不能手动切换")
+            postRender()
+            return
+        }
         config.mySideRed = !config.mySideRed
         stopCurrentSearch()
         resetSuggestionState(newAnalysisCycle = true)
         autoLastUcci = null
-        setStatus("分析方已指定为${if (config.mySideRed) "红方" else "黑方"}\n不再根据屏幕位置自动判断己方颜色")
+        setStatus("手动分析方已指定为${if (config.mySideRed) "红方" else "黑方"}\n自动检测逻辑当前已屏蔽")
         if (!paused) scheduleAnalysis()
         postRender()
     }
@@ -4263,6 +4463,24 @@ class ScreenAssistService : Service() {
      */
     private fun applyRecognizedBoard(res: RecognitionResult, fromManualRefresh: Boolean) {
         lastRejectReason = null
+        if (config.sideSelectionMode == SideSelectionMode.AUTO) {
+            val detected = SideSelectionPolicy.detectAutoSideRed(res.screenRaw)
+            if (detected == null) {
+                autoSideDetectionReady = false
+                val reason = "屏幕下半区无法唯一确认帅/将，棋面异常"
+                trace("AUTO_SIDE_REJECT", "reason=$reason source=manual-refresh")
+                tracker.reset(currentRedGo)
+                stableFrameWindow.rearm()
+                lastFailReason = reason
+                setStatus("棋面结构异常：$reason\n拒绝当前结果，正在重新识别…")
+                kickCapture()
+                requestWatchdog()
+                postRender()
+                return
+            }
+            if (config.autoSideRed != detected) config.autoSideRed = detected
+            autoSideDetectionReady = true
+        }
         // 半自动「更新棋谱」只把盘面更新到当前识别结果，**不凭盘面差异翻转轮次**——
         // 否则每点一次「更新棋谱」都可能让轮次跳一下。需要改轮次时用「切换走棋方」。
         val fenBefore = currentFen
@@ -4305,12 +4523,13 @@ class ScreenAssistService : Service() {
         recognitionEpoch++
         beginVisionEpoch()
         resumeRebasePending = false
-        tracker.reset(config.mySideRed)
-        currentRedGo = config.mySideRed
+        tracker.reset(mySideIsRed())
+        currentRedGo = mySideIsRed()
         history.clear()
         currentCanonical = null
         currentPieces = null
         currentFen = ""
+        autoSideDetectionReady = false
         currentOrientation = Orientation.STANDARD
         sessionGrid = null
         // 盘面已清空：连同"最近看到的盘面/建议所依据的盘面"一起清掉，
@@ -4534,8 +4753,12 @@ class ScreenAssistService : Service() {
     private fun hashButtonText(): String =
         "Hash" + hashLevels[hashIndex]
 
-    /** 我方颜色由用户明确指定，不再根据棋盘上下位置自动推断。 */
-    private fun mySideIsRed(): Boolean = config.mySideRed
+    /** 当前有效己方颜色：自动模式只读自动检测记忆，手动模式只读手动记忆。 */
+    private fun mySideIsRed(): Boolean = SideSelectionPolicy.effectiveSideRed(
+        config.sideSelectionMode,
+        config.mySideRed,
+        config.autoSideRed,
+    )
 
     /** 我方阵营代码，与 AssistBoard.movedSide 的约定一致：红=1、黑=0 */
     private fun mySideCode(): Int = if (mySideIsRed()) 1 else 0
@@ -5756,6 +5979,7 @@ class ScreenAssistService : Service() {
         frame: Frame,
         yolo: YoloBoardDetector,
         excluded: IntArray?,
+        relaxedRecovery: Boolean = false,
     ): DetectionBoardMapper.MappedBoard? {
         val grid = sessionGrid
         val region = config.boardRegion?.let { BoardRegionGeometry.fromArray(it) }
@@ -5773,13 +5997,21 @@ class ScreenAssistService : Service() {
         }
         val now = System.currentTimeMillis()
         val fullDue = crop == null || now - lastFullVisionCheckAt >= FULL_VISION_RECHECK_MS
-        if (fullDue) {
+        val result = if (fullDue) {
             lastFullVisionCheckAt = now
             // 本次稳定关键帧只执行一次整屏/框选范围推理；下一次样本再切换到裁剪定位。
-            return yolo.detect(frame, regionCrop, null, excluded)
+            yolo.detect(frame, regionCrop, null, excluded, relaxedRecovery)
+        } else {
+            // 已有网格时只执行一次裁剪推理；锚点仅提供几何基准，不替换当前类别。
+            yolo.detect(frame, crop, anchor, excluded, relaxedRecovery)
         }
-        // 已有网格时只执行一次裁剪推理；锚点仅提供几何基准，不替换当前类别。
-        return yolo.detect(frame, crop, anchor, excluded)
+        trace(
+            "VISION_RAW",
+            "tier=${yolo.modelTier.name} relaxed=$relaxedRecovery infer=${yolo.lastInferMs}ms " +
+                "raw=${yolo.lastRawDets} pieces=${yolo.lastPieceDets} " +
+                "mapped=${result?.pieceCount ?: 0} detections=${yolo.lastDetectionSummary}",
+        )
+        return result
     }
 
 
@@ -5944,7 +6176,12 @@ class ScreenAssistService : Service() {
             suspendedByForeground = foregroundPauseSnapshot?.suspendedByForeground == true,
             hasRunSession = runSessionStarted,
             sim = config.simEnabled,            strengthText = strengthButtonText(),
-            mySideText = if (myRed) "己方红" else "己方黑",
+            mySideText = if (config.sideSelectionMode == SideSelectionMode.AUTO) {
+                if (autoSideDetectionReady) "检测到${if (myRed) "红" else "黑"}" else "待检测"
+            } else {
+                "己方${if (myRed) "红" else "黑"}"
+            },
+            mySideSelectable = config.sideSelectionMode == SideSelectionMode.MANUAL,
             candidateCountText = "候选${config.candidateCount}",
             hashText = hashButtonText(),
             manualMode = manualMode,
@@ -5976,6 +6213,7 @@ class ScreenAssistService : Service() {
         stopping = true
         overlayClosed = true
         AssistAccessibilityService.setGlobalForegroundObserver(null)
+        mainHandler.removeCallbacks(foregroundProbe)
         recognitionEpoch++
         landingToken++
         landingState = null

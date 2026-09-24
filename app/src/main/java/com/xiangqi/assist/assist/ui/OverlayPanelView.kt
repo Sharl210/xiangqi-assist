@@ -57,6 +57,8 @@ class OverlayModel(
     val strengthText: String = "时间3s",
     /** 标题左侧的己方颜色按钮文案，直接表示当前分析方 */
     val mySideText: String = "己方红",
+    /** 手动模式可切换；自动检测模式下仅显示当前检测结果并禁用点击。 */
+    val mySideSelectable: Boolean = true,
     /** 候选数量档位文本（1..6），与引擎实际 MultiPV 完全一致 */
     val candidateCountText: String = "候选1",
     /** 引擎 Hash 按钮文案 */
@@ -287,6 +289,8 @@ class OverlayPanelView @JvmOverloads constructor(
         btnRun.isEnabled = true
         btnRun.setTextColor(if (model.running || model.suspendedByForeground) ON_COLOR else normalColor)
         btnMySide.text = model.mySideText
+        btnMySide.isEnabled = model.mySideSelectable
+        btnMySide.alpha = if (model.mySideSelectable) 1f else 0.48f
         btnMode.text = model.modeText
         btnAutoPlay.setTextColor(if (model.autoPlay) ON_COLOR else normalColor)
         btnSim.setTextColor(if (model.sim) ON_COLOR else normalColor)

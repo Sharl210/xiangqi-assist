@@ -160,8 +160,13 @@ class YoloBoardDetector(
         cropHint: DoubleArray? = null,
         anchor: DetectionBoardMapper.AnchorHint? = null,
         exclude: IntArray? = null,
+        /**
+         * A targeted second pass used only after the strict result was rejected as a
+         * likely skin/low-contrast missing-piece frame. It never copies a previous board.
+         */
+        relaxedRecovery: Boolean = false,
     ): DetectionBoardMapper.MappedBoard? = inferenceGate.runIfOpen {
-        detectInternal(frame, cropHint, anchor, exclude)
+        detectInternal(frame, cropHint, anchor, exclude, relaxedRecovery)
     }
 
     /** 只有生命周期闸门持有一个在途计数时才进入这里。 */
@@ -170,6 +175,7 @@ class YoloBoardDetector(
         cropHint: DoubleArray?,
         anchor: DetectionBoardMapper.AnchorHint?,
         exclude: IntArray?,
+        relaxedRecovery: Boolean,
     ): DetectionBoardMapper.MappedBoard? {
         val cx0: Int; val cy0: Int; val cw: Int; val ch: Int
         if (cropHint != null &&
@@ -188,9 +194,10 @@ class YoloBoardDetector(
         input.rewind()
         interpreter.run(input, output)
         val inferMs = System.currentTimeMillis() - t0
-        // 模型本身负责类别判定；锚点只用于几何兜底，不能放宽类别阈值或替换字形。
-        // 类别边际不足时直接丢弃该框，交给下一次稳定窗口重新识别，禁止上下文猜测。
-        val confThreshold = 0.45
+        // 正常通道保留严格阈值；只在上一帧刚被结构/漏子门拒绝后，
+        // 才允许对同一帧做一次低置信度救援。旧棋面仍不参与识别或补子。
+        val confThreshold = if (relaxedRecovery) CRITICAL_RECOVERY_CONF_THRESHOLD else 0.45
+        val classMarginMin = if (relaxedRecovery) 0.02 else 0.05
         val dets = YoloPostprocessor.decode(
             output[0], lb, cw, ch,
             confThreshold = confThreshold,
@@ -198,11 +205,19 @@ class YoloBoardDetector(
             aspectMax = 1.60,
             sizeMinFactor = 0.40,
             sizeMaxFactor = 2.00,
-            classMarginMin = 0.05,
+            classMarginMin = classMarginMin,
         )
         // 裁剪坐标 -> 帧坐标
         val shifted0 = shiftToFrame(dets, cx0, cy0)
         val shifted = excludeDetections(shifted0, exclude)
+        lastDetectionSummary = shifted
+            .filter { !it.isBoard }
+            .sortedByDescending { it.score }
+            .take(32)
+            .joinToString(";") { d ->
+                val alternatives = d.alternatives.joinToString(",") { "${it.first}:${"%.3f".format(it.second)}" }
+                "l=${d.labelId},s=${"%.3f".format(d.score)},c=${"%.1f".format(d.cx)},${"%.1f".format(d.cy)},alt=[$alternatives]"
+            }
         var mapped = DetectionBoardMapper.map(
             shifted, frame.width, frame.height, anchor = anchor,
             preferAnchor = cropHint != null && anchor != null,
@@ -212,15 +227,15 @@ class YoloBoardDetector(
         // 皮肤或装饰差异可能让帅/将的置信度短暂跌过普通门槛。
         // 仅在严格结果缺王时，对同一模型输出做一次较宽松的重解码；
         // rescue 结果仍必须包含双王、通过基础结构校验，不能用旧棋面补子。
-        if (mapped == null || !hasBothKings(mapped.canonical)) {
+        if (mapped == null || !hasBothKings(mapped.canonical) || relaxedRecovery) {
             val rescue = YoloPostprocessor.decode(
                 output[0], lb, cw, ch,
-                confThreshold = CRITICAL_RECOVERY_CONF_THRESHOLD,
+                confThreshold = if (relaxedRecovery) 0.24 else CRITICAL_RECOVERY_CONF_THRESHOLD,
                 aspectMin = 0.50,
                 aspectMax = 1.60,
                 sizeMinFactor = 0.40,
                 sizeMaxFactor = 2.00,
-                classMarginMin = 0.02,
+                classMarginMin = if (relaxedRecovery) 0.01 else 0.02,
             )
             val rescueMapped = DetectionBoardMapper.map(
                 excludeDetections(shiftToFrame(rescue, cx0, cy0), exclude),
@@ -283,6 +298,10 @@ class YoloBoardDetector(
 
     /** 最近一次推理的原始检测框总数，诊断用 */
     @Volatile var lastRawDets: Int = 0
+        private set
+
+    /** 最近一次推理的原始检测摘要：类别、置信度、候选类别与中心点，用于复现错类而不保存截图。 */
+    @Volatile var lastDetectionSummary: String = ""
         private set
 
     @Synchronized

@@ -101,7 +101,8 @@ object PipelineHealthPolicy {
             return if (recoveryAllowed(h)) Action.RESET_VISION else Action.NONE
         }
         if (h.lastFrameAt > 0L && h.lastStableAt > 0L &&
-            h.now - h.lastStableAt > STREAM_STABLE_STALL_MS
+            (h.lastProcessedSampleAt <= 0L ||
+                h.now - h.lastProcessedSampleAt > STREAM_STABLE_STALL_MS)
         ) {
             return if (recoveryAllowed(h)) Action.RESET_VISION else Action.NONE
         }

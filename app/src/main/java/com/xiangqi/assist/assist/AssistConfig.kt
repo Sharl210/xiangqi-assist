@@ -187,10 +187,23 @@ class AssistConfig(context: Context) {
             ).commit()
         }
 
-    /** 本次分析的己方颜色：true=红方，false=黑方；默认红方。 */
+    /** 手动模式记忆的己方颜色：true=红方，false=黑方；默认红方。 */
     var mySideRed: Boolean
         get() = sp.getBoolean(KEY_MY_SIDE_RED, true)
         set(value) { sp.edit().putBoolean(KEY_MY_SIDE_RED, value).commit() }
+
+    /**
+     * 执子方来源。手动模式只使用 [mySideRed]；自动模式完全屏蔽手动值，
+     * 只使用 [autoSideRed]，两套记忆互不覆盖。
+     */
+    var sideSelectionMode: SideSelectionMode
+        get() = SideSelectionMode.fromStored(sp.getString(KEY_SIDE_SELECTION_MODE, SideSelectionMode.MANUAL.name))
+        set(value) { sp.edit().putString(KEY_SIDE_SELECTION_MODE, value.name).commit() }
+
+    /** 自动检测模式最近一次稳定识别到的己方颜色，独立于手动执子方。 */
+    var autoSideRed: Boolean
+        get() = sp.getBoolean(KEY_AUTO_SIDE_RED, true)
+        set(value) { sp.edit().putBoolean(KEY_AUTO_SIDE_RED, value).commit() }
 
     /** 时间模式最大思考时间，默认3秒；上限 240 秒（旧配置里的 360000 会被夹到 240000）。 */
     var thinkTimeMs: Int
@@ -318,6 +331,8 @@ class AssistConfig(context: Context) {
         private const val KEY_THINKING_MODE = "thinking_mode"
         private const val KEY_PER_CANDIDATE_TIME = "per_candidate_time_ms"
         private const val KEY_MY_SIDE_RED = "my_side_red"
+        private const val KEY_SIDE_SELECTION_MODE = "side_selection_mode"
+        private const val KEY_AUTO_SIDE_RED = "auto_side_red"
         const val DEFAULT_HASH_MB = 512
         private const val KEY_HASH_MB = "hash_mb"
         private const val KEY_YOLO_MODEL_TIER = "yolo_model_tier"
