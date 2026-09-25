@@ -72,3 +72,20 @@ class SideSelectionPolicyTest {
         assertNull(SideSelectionPolicy.detectAutoSideRed(emptyArray()))
     }
 }
+
+class SideSelectionPresentationPolicyTest {
+    @Test fun `only an attached expanded visible panel is refreshed immediately`() {
+        assertTrue(SideSelectionPresentationPolicy.shouldRefreshExpandedPanel(
+            panelAttached = true, collapsed = false, temporarilySuppressed = false,
+        ))
+        assertFalse(SideSelectionPresentationPolicy.shouldRefreshExpandedPanel(
+            panelAttached = false, collapsed = false, temporarilySuppressed = false,
+        ))
+        assertFalse(SideSelectionPresentationPolicy.shouldRefreshExpandedPanel(
+            panelAttached = true, collapsed = true, temporarilySuppressed = false,
+        ))
+        assertFalse(SideSelectionPresentationPolicy.shouldRefreshExpandedPanel(
+            panelAttached = true, collapsed = false, temporarilySuppressed = true,
+        ))
+    }
+}

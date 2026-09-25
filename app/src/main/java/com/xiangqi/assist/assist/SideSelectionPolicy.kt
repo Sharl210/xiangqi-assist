@@ -15,6 +15,15 @@ enum class SideSelectionMode {
     }
 }
 
+object SideSelectionPresentationPolicy {
+    /** Only refresh an already attached, expanded panel; never create an overlay while changing mode. */
+    fun shouldRefreshExpandedPanel(
+        panelAttached: Boolean,
+        collapsed: Boolean,
+        temporarilySuppressed: Boolean,
+    ): Boolean = panelAttached && !collapsed && !temporarilySuppressed
+}
+
 object SideSelectionPolicy {
     /**
      * 仅以屏幕下半区的帅/将作为自动执子方锚点：红帅在下=红方，黑将在下=黑方。

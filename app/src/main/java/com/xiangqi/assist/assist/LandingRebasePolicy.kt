@@ -3,38 +3,52 @@ package com.xiangqi.assist.assist
 /**
  * 落子核对超时后的首张稳定棋面如何重新确定走子方。
  *
- * 这一步不能把旧的“当前棋面”直接当成事实：超时期间屏幕可能停留在落子前、
- * 已落子，或已经连对手的一手也走完。只使用落子事务保存的两份快照和新画面，
- * 不修改棋盘内容，也不把不确定结果伪装成已确认。
+ * 仅当新画面与落子前局面、预期落子后局面完全一致，或能证明是预期局面的一个合法
+ * 对手应手时，才允许重建基线。无法建立关系的观测必须拒绝，不能只凭“棋面本身看起来合法”
+ * 就把漏识别/漂移结果提升为可信局面。
  */
 object LandingRebasePolicy {
+    enum class Relation {
+        PRE_MOVE,
+        EXPECTED_POST_MOVE,
+        OPPONENT_REPLY,
+        UNRELATED,
+    }
+
+    data class Resolution(
+        val relation: Relation,
+        /** 红方是否走；UNRELATED 时为 null，表示不得提交该棋面。 */
+        val redGo: Boolean?,
+    ) {
+        val accepted: Boolean get() = redGo != null
+    }
+
     /**
-     * @return 首张新稳定画面对应的红方走子状态；true=红走，false=黑走。
+     * 根据事务快照判定重建棋面关系。
+     *
+     * 我方落子未生效时保持 [preRedGo]；预期落子后轮到另一方；预期局面之后仅接受
+     * 轮到的对手完成的一步合法棋，其后恢复 [preRedGo]。跳帧、多次未知走子和残缺观测
+     * 返回 UNRELATED，由调用方保持原基线并等待重新识别。
      */
-    fun redGoForObserved(
+    fun resolve(
         observed: Array<IntArray>,
         preBoard: Array<IntArray>?,
         expectedPostBoard: Array<IntArray>?,
         preRedGo: Boolean,
-    ): Boolean {
-        // 画面仍是落子前：这手没有生效，保持原走子方。
-        if (preBoard != null && AssistBoard.equal(observed, preBoard)) return preRedGo
-
-        // 画面正好是预期落子后：只确认我方这手，轮到另一方。
+    ): Resolution {
+        if (preBoard != null && AssistBoard.equal(observed, preBoard)) {
+            return Resolution(Relation.PRE_MOVE, preRedGo)
+        }
         if (expectedPostBoard != null && AssistBoard.equal(observed, expectedPostBoard)) {
-            return !preRedGo
+            return Resolution(Relation.EXPECTED_POST_MOVE, !preRedGo)
         }
-
-        // 期间又出现了下一手：若能从“预期落子后”看出对方移动，
-        // 则轮次回到落子前的一方；若看出我方移动，则轮到另一方。
-        // movedSide 返回 1=红刚走、0=黑刚走，下一轮就是相反颜色。
-        val movedAfterExpected = expectedPostBoard?.let {
-            AssistBoard.movedSide(it, observed)
+        if (expectedPostBoard != null && AssistBoard.isLegalSingleMove(expectedPostBoard, observed)) {
+            val movedSide = AssistBoard.movedSide(expectedPostBoard, observed)
+            val expectedMover = if (!preRedGo) 1 else 0
+            if (movedSide == expectedMover) {
+                return Resolution(Relation.OPPONENT_REPLY, preRedGo)
+            }
         }
-        if (movedAfterExpected != null) return movedAfterExpected == 0
-
-        // 新画面与两份快照都无法建立可靠关系时，保留事务开始前的走子方；
-        // 棋面本身仍由当前识别结果提交，后续真实变化会再次触发正常分析。
-        return preRedGo
+        return Resolution(Relation.UNRELATED, null)
     }
 }

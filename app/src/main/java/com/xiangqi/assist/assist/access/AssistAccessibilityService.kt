@@ -73,8 +73,16 @@ class AssistAccessibilityService : AccessibilityService() {
             // 没有标记活动窗口时兜底，避免后台窗口事件被误报成真实切出。
             val target = activeWindow ?: eventWindow
             target to (eventWindow != null && target === eventWindow)
-        }.getOrNull() ?: return
-        val target = targetAndEventMatch.first ?: return
+        }.getOrNull()
+        if (targetAndEventMatch == null) {
+            reportForegroundUnavailable("application-window-query-failed")
+            return
+        }
+        val target = targetAndEventMatch.first
+        if (target == null) {
+            reportForegroundUnavailable("no-active-application-window")
+            return
+        }
         val eventWasApplicationWindow = targetAndEventMatch.second
         // canRetrieveWindowContent=false 的 ROM 可能不给 root；只有事件本身命中
         // application window 时，才允许把它携带的包名作为受限回退。系统通知事件
@@ -82,14 +90,23 @@ class AssistAccessibilityService : AccessibilityService() {
         val packageName = runCatching { target.root?.packageName?.toString() }
             .getOrNull()?.trim().orEmpty().ifEmpty {
                 if (eventWasApplicationWindow) eventPackage?.trim().orEmpty() else ""
-            }.ifEmpty { return }
+            }
+        if (packageName.isEmpty()) {
+            reportForegroundUnavailable("active-window-package-unavailable")
+            return
+        }
         val bounds = Rect()
         target.getBoundsInScreen(bounds)
         val dm = resources.displayMetrics
         globalForegroundObserver?.invoke(
             packageName,
             isFullScreenBounds(bounds, dm.widthPixels, dm.heightPixels),
+            null,
         )
+    }
+
+    private fun reportForegroundUnavailable(reason: String) {
+        globalForegroundObserver?.invoke(null, false, reason)
     }
 
     /** 供连线服务在已连接的无障碍通道上主动建立一次全屏基准。 */
@@ -232,10 +249,10 @@ class AssistAccessibilityService : AccessibilityService() {
         private const val SWIPE_DURATION_MS = 180L
 
         @Volatile
-        private var globalForegroundObserver: ((String?, Boolean) -> Unit)? = null
+        private var globalForegroundObserver: ((String?, Boolean, String?) -> Unit)? = null
 
         /** 屏幕识别服务安装/移除前台切换回调；不读取窗口内容。 */
-        fun setGlobalForegroundObserver(observer: ((String?, Boolean) -> Unit)?) {
+        fun setGlobalForegroundObserver(observer: ((String?, Boolean, String?) -> Unit)?) {
             globalForegroundObserver = observer
         }
 

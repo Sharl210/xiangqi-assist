@@ -29,8 +29,16 @@ object ForegroundWindowStabilityPolicy {
         packageName: String?,
         isFullScreen: Boolean,
         requiredStableFrames: Int = FrameStabilityPolicy.REQUIRED_STABLE_FRAMES,
+        observationAvailable: Boolean = true,
     ): Result {
         val required = requiredStableFrames.coerceAtLeast(1)
+        if (!observationAvailable) {
+            // Missing accessibility data is not a stable sample; never join counts across a gap.
+            return Result(
+                state.copy(candidatePackage = null, candidateFrames = 0),
+                Decision.IGNORE,
+            )
+        }
         val base = ForegroundAppPolicy.observe(
             ownerPackage = ownerPackage,
             baselinePackage = state.stablePackage,

@@ -134,7 +134,25 @@ object PipelineHealthPolicy {
         if (base <= 0L) return false
         if (h.now - base > LANDING_ABSOLUTE_MS) return true
         if (h.landingStage != LandingFlow.Stage.VERIFYING) return false
-        val progress = maxOf(base, h.lastVisionAt, h.lastRecognitionCompletedAt)
+
+        // A healthy capture stream may spend one complete stable window collecting samples,
+        // then another interval running YOLO. Those are real in-flight progress even before a
+        // new valid board is committed; do not abandon VERIFYING solely because visionAt is old.
+        val recognitionStartedAt = when {
+            h.inferenceInFlight -> h.inferenceStartedAt
+            h.recognitionPending -> h.recognitionPendingSinceAt
+            else -> 0L
+        }
+        if (recognitionStartedAt > 0L && h.now - recognitionStartedAt <= INFERENCE_STUCK_MS) {
+            return false
+        }
+        val progress = maxOf(
+            base,
+            h.lastVisionAt,
+            h.lastRecognitionCompletedAt,
+            h.lastStableAt,
+            h.lastProcessedSampleAt,
+        )
         return h.now - progress > LANDING_FRAME_GRACE_MS
     }
 

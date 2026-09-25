@@ -65,8 +65,14 @@ class ForegroundWindowStabilityPolicyTest {
     }
 
     @Test
-    fun `system and non fullscreen windows do not advance the candidate`() {
-        val state = ForegroundWindowStabilityPolicy.State(stablePackage = "com.game")
+    fun `system overlays preserve candidate but unavailable observations break consecutive stability`() {
+        var state = ForegroundWindowStabilityPolicy.State(stablePackage = "com.game")
+        repeat(4) {
+            state = ForegroundWindowStabilityPolicy.observe(
+                owner, state, "com.chat", true, requiredStableFrames = 8,
+            ).state
+        }
+        val pending = state
         val system = ForegroundWindowStabilityPolicy.observe(
             owner, state, "com.android.systemui", true, requiredStableFrames = 8,
         )
@@ -75,7 +81,22 @@ class ForegroundWindowStabilityPolicyTest {
         )
         assertTrue(system.decision is ForegroundWindowStabilityPolicy.Decision.IGNORE)
         assertTrue(floating.decision is ForegroundWindowStabilityPolicy.Decision.IGNORE)
-        assertEquals(state, system.state)
-        assertEquals(state, floating.state)
+        assertEquals(pending, system.state)
+        assertEquals(pending, floating.state)
+
+        val unavailable = ForegroundWindowStabilityPolicy.observe(
+            owner, state, null, false, requiredStableFrames = 8, observationAvailable = false,
+        )
+        assertTrue(unavailable.decision is ForegroundWindowStabilityPolicy.Decision.IGNORE)
+        assertEquals(
+            ForegroundWindowStabilityPolicy.State(stablePackage = "com.game"),
+            unavailable.state,
+        )
+        val resumed = ForegroundWindowStabilityPolicy.observe(
+            owner, unavailable.state, "com.chat", true, requiredStableFrames = 8,
+        )
+        assertEquals(1, resumed.state.candidateFrames)
+        assertTrue(resumed.decision is ForegroundWindowStabilityPolicy.Decision.PENDING)
     }
+
 }

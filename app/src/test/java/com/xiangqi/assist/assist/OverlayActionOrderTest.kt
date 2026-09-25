@@ -72,4 +72,24 @@ class OverlayActionOrderTest {
         assertTrue(xml.indexOf("Widget.XiangqiAssist.Button.Primary", xml.indexOf("button_link")) >= 0)
         assertTrue(xml.indexOf("Widget.XiangqiAssist.Button.Secondary", xml.indexOf("button_play")) >= 0)
     }
+
+    @Test
+    fun `side status button wraps content and remains on one line`() {
+        val xml = java.io.File("src/main/res/layout/overlay_panel.xml").readText()
+        val line = xml.lineSequence().first { it.contains("overlay_btn_my_side") }
+        assertTrue(line.contains("android:layout_width=\"wrap_content\""))
+        assertTrue(line.contains("android:minWidth=\"52dp\""))
+        assertTrue(line.contains("android:maxLines=\"1\""))
+    }
+
+    @Test
+    fun `side mode status refresh is explicitly limited to a visible panel`() {
+        val source = java.io.File("src/main/java/com/xiangqi/assist/assist/ScreenAssistService.kt").readText()
+        val start = source.indexOf("fun requestSideSelectionMode(mode: SideSelectionMode)")
+        val end = source.indexOf("fun sideSelectionMode()", start)
+        assertTrue(start >= 0 && end > start)
+        val method = source.substring(start, end)
+        assertTrue(method.contains("onlyIfExpandedPanelVisible = true"))
+        assertTrue(!method.contains("postRender()"))
+    }
 }

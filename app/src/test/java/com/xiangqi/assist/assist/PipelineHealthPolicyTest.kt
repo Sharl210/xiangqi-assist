@@ -210,7 +210,8 @@ class PipelineHealthPolicyTest {
         val noProgress = base(now = completed + PipelineHealthPolicy.LANDING_FRAME_GRACE_MS - 1L,
             landingStage = LandingFlow.Stage.VERIFYING, landingStartedAt = completed - 200L,
             landingCompletedAt = completed, lastVisionAt = completed - 100L,
-            lastRecognitionCompletedAt = completed - 100L, lastProcessedSampleAt = completed - 100L,
+            lastRecognitionCompletedAt = completed - 100L, lastStableAt = completed - 100L,
+            lastProcessedSampleAt = completed - 100L,
             lastCaptureKickAt = completed + PipelineHealthPolicy.LANDING_FRAME_GRACE_MS - 1L)
         assertEquals(PipelineHealthPolicy.Action.NONE, PipelineHealthPolicy.evaluate(noProgress))
         assertEquals(PipelineHealthPolicy.Action.REBASE_LANDING,
@@ -220,6 +221,44 @@ class PipelineHealthPolicyTest {
             landingStage = LandingFlow.Stage.DISPATCHING, landingStartedAt = completed,
             landingCompletedAt = 0L, lastVisionAt = completed, lastRecognitionCompletedAt = completed)
         assertEquals(PipelineHealthPolicy.Action.REBASE_LANDING, PipelineHealthPolicy.evaluate(dispatching))
+    }
+
+    @Test fun `processed capture samples count as landing progress before recognition commits a board`() {
+        val completed = 100_000L
+        val now = completed + 2_000L
+        val flowing = base(
+            now = now,
+            landingStage = LandingFlow.Stage.VERIFYING,
+            landingStartedAt = completed - 200L,
+            landingCompletedAt = completed,
+            lastVisionAt = completed,
+            lastRecognitionCompletedAt = completed,
+            lastStableAt = now - 125L,
+            lastProcessedSampleAt = now - 125L,
+            lastCaptureKickAt = now,
+        )
+        assertEquals(PipelineHealthPolicy.Action.NONE, PipelineHealthPolicy.evaluate(flowing))
+    }
+
+    @Test fun `healthy in flight recognition can finish but landing absolute cap still applies`() {
+        val completed = 100_000L
+        val inFlight = base(
+            now = completed + 3_000L,
+            landingStage = LandingFlow.Stage.VERIFYING,
+            landingStartedAt = completed - 200L,
+            landingCompletedAt = completed,
+            lastVisionAt = completed,
+            lastRecognitionCompletedAt = completed,
+            lastProcessedSampleAt = completed + 125L,
+            inferenceInFlight = true,
+            inferenceStartedAt = completed + 1_200L,
+            lastCaptureKickAt = completed + 3_000L,
+        )
+        assertEquals(PipelineHealthPolicy.Action.NONE, PipelineHealthPolicy.evaluate(inFlight))
+        assertEquals(
+            PipelineHealthPolicy.Action.REBASE_LANDING,
+            PipelineHealthPolicy.evaluate(inFlight.copy(now = completed + PipelineHealthPolicy.LANDING_ABSOLUTE_MS + 1L)),
+        )
     }
 
     @Test fun `paused capture death and invalid clock never trigger recovery`() {

@@ -4,12 +4,13 @@
 
 > 本项目仅用于个人学习、技术研究与文化交流。使用屏幕识别、悬浮窗或自动落子功能时，请遵守所在平台规则以及当地法律法规。
 
-## 1.3版本与发行
+## 1.3.1 修复版本与发行
 
-- 正式版本目标：象棋辅助 1.3（versionCode 4），在已发布的 1.2（versionCode 3）基础上加入大型 YOLO 集成档。
-- 正式 Release 标签：`v1.3`。GitHub Actions 会在该标签上使用仓库加密密钥重新构建、签名并上传两个正式 APK 及 `SHA256SUMS.txt`；正式下载文件以 GitHub Release 页面为准。
+- 后续修复版本目标：象棋辅助 1.3.1（versionCode 5），作为已公开 1.3（versionCode 4）的增量补丁，不替换 `v1.3` 原标签或发行附件。
+- 1.3.1 正式发行标签：`v1.3.1`。该标签工作流使用仓库加密密钥构建、签名并上传两个正式 APK 与 `SHA256SUMS.txt`；正式附件以 [GitHub Releases](https://github.com/Sharl210/xiangqi-assist/releases) 页面为准。
+- 1.3 已发布的稳定版本仍可在 [v1.3 Release](https://github.com/Sharl210/xiangqi-assist/releases/tag/v1.3) 获取。
 - 大型档由 Medium 与 universal/旋转鲁棒模型组成逐锚点择优集成，保持 `[1,640,640,3] → [1,25200,20]` 契约；用户可在辅助页选择大型、中型或 Lite。
-- 1.2历史发布说明见[1.2发布说明](docs/RELEASE_1.2.md)，1.3发布说明见[1.3发布说明](docs/RELEASE_1.3.md)。
+- 1.2、1.3 和 1.3.1 发布说明分别见[1.2发布说明](docs/RELEASE_1.2.md)、[1.3发布说明](docs/RELEASE_1.3.md)与[1.3.1发布说明](docs/RELEASE_1.3.1.md)。
 
 ## 主要特色
 
@@ -18,22 +19,22 @@
 - 在辅助页选择 YOLO 模型档位，默认大型档为真实的双模型集成工件；选择会记住，兼容性失败时按大型→中型→Lite回退。
 - **棋盘范围框选**：可调整并记忆识别区域，减少棋盘区域之外画面变化的影响。
 - **稳定帧判定**：录屏流保持每秒 8 个样本；只有连续 8 个样本画面稳定（约0.875秒），才选择其中较清晰的一帧识别；全局看门狗补采不跳过这个稳定门。
-- **全局识图恢复**：约500ms没有新的样本消费时做非破坏性补采；等待对方阶段阈值250ms，其它识图阶段500ms；非法棋面会立即拒绝并受控重识别。
+- **识图恢复**：持续确认采帧、稳定窗、推理和识别进展；异常棋面拒绝后继续受控识别，避免用未经验证的局面指导自动落子。
 - **暂停与关闭**：暂停时停止向应用输出帧并释放帧读取器，尽量保留投影授权和无障碍前台监听；切出触发的临时暂停与手动暂停分别恢复。
 - **预选与落子**：预选切换不同棋子时点按其起点，点按间隔随机 750–1250ms；正式落子起点到终点的既有随机时序独立保持。
 - **变招二次点击取消**：用户可随时提前点击“变招”存下下一次我方非默认候选；按钮绿色时再次点击会清除存量并立即恢复白色。实际非默认着法完成核对后也会自动清除存量并恢复白色。
-- **悬浮窗辅助**：显示识别棋盘、状态、候选走法和建议，支持指导、半自动、手动摆子和自动走子。
+- **悬浮窗执子方**：手动选择和自动检测互斥；自动检测使用屏幕棋盘下半区的帅/将作为阵营锚点。手动和自动模式分别保存颜色选择。
 - **双引擎变体**：提供通用 ARMv8 与 ARMv8 dotprod 版本。
 
 ## 正式 APK 选择
 
 | 正式 Release 附件 | 适用设备 |
 | --- | --- |
-| `xiangqi-assist-1.3-armv8.apk` | 通用 64 位 ARM Android 设备，兼容性优先 |
-| `xiangqi-assist-1.3-armv8-dotprod.apk` | 支持 ARMv8.2 dotprod 指令的设备 |
-| `SHA256SUMS.txt` | 正式 Release 同批生成的 APK 校验值 |
+| `xiangqi-assist-1.3.1-armv8.apk` | 通用 64 位 ARM Android 设备，兼容性优先 |
+| `xiangqi-assist-1.3.1-armv8-dotprod.apk` | 支持 ARMv8.2 dotprod 指令的设备 |
+| `SHA256SUMS.txt` | 同次 Release 生成的 APK 校验值 |
 
-正式附件会在 `v1.3` 标签工作流中生成。本地 APK 文件名包含构建日期，不等同于正式附件。Release 建立后，以 GitHub Release 页面和同批的 `SHA256SUMS.txt` 为准。
+正式附件会在 `v1.3.1` 标签工作流中生成；本地 APK 文件名包含构建日期，不等同于正式附件。1.3.1 Release 发布前，正式稳定版本仍以 [v1.3 Release](https://github.com/Sharl210/xiangqi-assist/releases/tag/v1.3) 为准。
 
 ## 使用概览
 
@@ -66,7 +67,7 @@
 ./gradlew :app:testArmv8-DebugUnitTest
 ```
 
-未提供发布密钥时，本地源码构建使用 Android Debug 签名，仅供测试。正式签名由 `v1.3` GitHub Actions 工作流从仓库加密密钥注入；不要将本地调试签名 APK 当作正式附件。
+未提供发布密钥时，本地源码构建使用 Android Debug 签名，仅供测试。正式签名由 `v1.3.1` GitHub Actions 工作流从仓库加密密钥注入；不要将本地调试签名 APK 当作正式附件。公开版 `v1.3` 保持原样。
 
 ## 项目结构、鸣谢与许可
 
@@ -74,7 +75,7 @@
 - `filepicker/`：棋谱文件选择组件。
 - `tinypinyin/`：拼音检索相关组件。
 - `docs/`：使用说明、开发计划、发布说明与技术记录。
-- `release/1.1/`：已发布 1.1 的历史归档；1.2历史发布和1.3候选不放入该目录。
+- `release/1.1/`：已发布 1.1 的历史归档；后续发行版本通过 GitHub Releases 保存。
 
 感谢 chinese-chess-android、Pikafish、DroidFish、VinXiangQi、cchess、MPAndroidChart、TensorFlow Lite、YOLO 及 Android 开源生态的作者与贡献者。
 

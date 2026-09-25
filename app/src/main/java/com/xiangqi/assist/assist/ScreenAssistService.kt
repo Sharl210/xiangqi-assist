@@ -153,6 +153,8 @@ class ScreenAssistService : Service() {
         /** 无障碍通道检查/恢复最小间隔，通道断开时只做后台自愈，不关闭开关。 */
         private const val ACCESSIBILITY_RECOVERY_INTERVAL_MS = 2500L
         private const val ACCESSIBILITY_WATCHDOG_MS = 2500L
+        /** 前台窗口无变化时也每秒留一条轻量证据，便于区分“未观察到”与“未暂停”。 */
+        private const val FOREGROUND_OBSERVATION_TRACE_INTERVAL_MS = 1000L
     }
 
     /**
@@ -496,11 +498,10 @@ class ScreenAssistService : Service() {
                 SideSelectionMode.MANUAL ->
                     "已切换为手动执子方：当前${if (config.mySideRed) "红方" else "黑方"}；自动记忆仍保留"
             }
-            setStatus(modeStatus)
+            setStatus(modeStatus, onlyIfExpandedPanelVisible = true)
             if (!paused && currentFen.isNotEmpty() && (mode == SideSelectionMode.MANUAL || detected != null)) {
                 scheduleAnalysis()
             }
-            postRender()
         }
     }
 
@@ -1049,9 +1050,11 @@ class ScreenAssistService : Service() {
                 trace(
                     "PIPELINE_WATCHDOG_ACTION",
                     "action=$action phase=${refreshPhase()} landing=${landing?.stage} " +
-                        "frameAge=${ageOf(now, lastStreamFrameAt)} stableAge=${ageOf(now, lastStableWindowAt)} " +
-                        "visionAge=${ageOf(now, lastVisionAt)} inference=${recognitionInFlight.get()} " +
-                        "inferenceAge=${ageOf(now, inferenceStartedAt)}"
+                        "frameAge=${ageOf(now, lastStreamFrameAt)} processedAge=${ageOf(now, lastProcessedSampleAt)} " +
+                        "stableAge=${ageOf(now, lastStableWindowAt)} visionAge=${ageOf(now, lastVisionAt)} " +
+                        "recognitionAge=${ageOf(now, lastRecognitionCompletedAt)} " +
+                        "inference=${recognitionInFlight.get()} " +
+                        "inferenceAge=${ageOf(now, inferenceStartedAt)} pending=${pendingRecognitionAt > 0L}"
                 )
                 when (action) {
                     PipelineHealthPolicy.Action.KICK_CAPTURE -> kickCapture()
@@ -1230,6 +1233,10 @@ class ScreenAssistService : Service() {
     @Volatile private var foregroundWindowStabilityState = ForegroundWindowStabilityPolicy.State()
     @Volatile private var foregroundPauseSnapshot: ForegroundPausePolicy.Snapshot? = null
     @Volatile private var foregroundLastEventAt = 0L
+    @Volatile private var foregroundLastTraceAt = 0L
+    @Volatile private var foregroundLastObservedPackage: String? = null
+    @Volatile private var foregroundLastObservedFullScreen: Boolean? = null
+    @Volatile private var foregroundLastObservationReason: String? = null
 
     /**
      * 无障碍事件不保证每一帧都回调；周期性查询当前全屏 application window，
@@ -1238,7 +1245,12 @@ class ScreenAssistService : Service() {
     private val foregroundProbe = object : Runnable {
         override fun run() {
             if (!stopping && !overlayClosed) {
-                AssistAccessibilityService.instance?.reportCurrentForegroundWindow()
+                val accessibility = AssistAccessibilityService.instance
+                if (accessibility != null) {
+                    accessibility.reportCurrentForegroundWindow()
+                } else {
+                    onForegroundWindowEvent(null, false, "accessibility-disconnected")
+                }
                 mainHandler.postDelayed(this, FrameStabilityPolicy.SAMPLE_PERIOD_MS)
             }
         }
@@ -1382,8 +1394,8 @@ class ScreenAssistService : Service() {
         // 自动走子是持久用户开关：服务重建、无障碍断开、录屏重启都先恢复它，
         // 只有用户明确点击关闭入口才允许写成 false。
         autoPlayOn = config.autoPlay
-        AssistAccessibilityService.setGlobalForegroundObserver { pkg, full ->
-            mainHandler.post { onForegroundWindowEvent(pkg, full) }
+        AssistAccessibilityService.setGlobalForegroundObserver { pkg, full, unavailableReason ->
+            mainHandler.post { onForegroundWindowEvent(pkg, full, unavailableReason) }
         }
         mainHandler.removeCallbacks(foregroundProbe)
         mainHandler.post(foregroundProbe)
@@ -1841,17 +1853,42 @@ class ScreenAssistService : Service() {
         lastStreamPhase = null
     }
 
-    /** 由无障碍窗口事件调用；只有连续八个稳定观察样本才提交前台切换。 */
-    private fun onForegroundWindowEvent(packageName: String?, isFullScreen: Boolean) {
+    /** 由无障碍窗口事件或周期探测调用；只有连续八个稳定观察样本才提交前台切换。 */
+    private fun onForegroundWindowEvent(
+        packageName: String?,
+        isFullScreen: Boolean,
+        unavailableReason: String? = null,
+    ) {
         if (stopping || overlayClosed) return
-        foregroundLastEventAt = System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        foregroundLastEventAt = now
+        val observedPackage = packageName?.trim().orEmpty()
         val observed = ForegroundWindowStabilityPolicy.observe(
             ownerPackage = packageNameForForegroundOwner(),
             state = foregroundWindowStabilityState,
             packageName = packageName,
             isFullScreen = isFullScreen,
+            observationAvailable = unavailableReason == null,
         )
         foregroundWindowStabilityState = observed.state
+        if (observedPackage != foregroundLastObservedPackage ||
+            foregroundLastObservedFullScreen != isFullScreen ||
+            foregroundLastObservationReason != unavailableReason ||
+            now - foregroundLastTraceAt >= FOREGROUND_OBSERVATION_TRACE_INTERVAL_MS
+        ) {
+            val state = foregroundWindowStabilityState
+            trace(
+                "FOREGROUND_OBSERVATION",
+                "package=${observedPackage.ifEmpty { "unavailable" }} full=$isFullScreen " +
+                    "reason=${unavailableReason ?: "observed"} stable=${state.stablePackage ?: "none"} " +
+                    "candidate=${state.candidatePackage ?: "none"} frames=${state.candidateFrames}/" +
+                    "${FrameStabilityPolicy.REQUIRED_STABLE_FRAMES} accessibility=${AssistAccessibilityService.isConnected()}"
+            )
+            foregroundLastTraceAt = now
+            foregroundLastObservedPackage = observedPackage
+            foregroundLastObservedFullScreen = isFullScreen
+            foregroundLastObservationReason = unavailableReason
+        }
         when (val decision = observed.decision) {
             ForegroundWindowStabilityPolicy.Decision.IGNORE -> Unit
             is ForegroundWindowStabilityPolicy.Decision.PENDING -> {
@@ -2373,22 +2410,18 @@ class ScreenAssistService : Service() {
             BoardCompletenessPolicy.rejectionReason(currentCanonical, canonical)?.let { return it }
         }
         if (landingRebasePending) {
-            // 核对超时后的第一张画面可能是落子前、预期落子后，或期间已经走了新着法。
-            // 不要求它必须是一两步可达，但仍拒绝相对保存快照明显“只少了棋子”的残缺子集，
-            // 否则日志中 27→26→…→13 的坏盘面会在每次超时重建时重新成为基线。
-            val rebaseBaselines = listOf(landingRebasePreBoard, landingRebaseExpectedBoard)
-                .filterNotNull()
-            val rebaseIssues = rebaseBaselines
-                .mapNotNull { BoardCompletenessPolicy.rejectionReason(it, canonical) }
-            // 观察结果只要能由任一保存快照解释，就继续交给轮次重建；只有相对所有
-            // 可用快照都呈现残缺子集时才拒绝，避免“预期落子后盘面”被落子前快照误杀。
-            if (rebaseBaselines.isNotEmpty() && rebaseIssues.size == rebaseBaselines.size) {
-                return rebaseIssues.first()
+            // 超时后的重建只接受已保存的落子前局面、预期落子后局面，或从预期局面
+            // 能验证的一步合法对手应手；无关/漏子的“看起来合法”棋面不能成为新基线。
+            val resolution = LandingRebasePolicy.resolve(
+                observed = canonical,
+                preBoard = landingRebasePreBoard,
+                expectedPostBoard = landingRebaseExpectedBoard,
+                preRedGo = landingRebaseRedGo,
+            )
+            if (!resolution.accepted) {
+                return "落子核对后的棋面与落子前/预期局面及一步合法应手均不匹配"
             }
-            // 两种轮次只要有一种对引擎安全就应放行，避免“将军着”因暂用旧轮次被误拒。
-            val before = AssistBoard.engineUnsafeReason(canonical, landingRebaseRedGo)
-            val after = AssistBoard.engineUnsafeReason(canonical, !landingRebaseRedGo)
-            return if (before == null || after == null) null else before
+            return AssistBoard.engineUnsafeReason(canonical, resolution.redGo!!)
         }
         if (resumeRebasePending) {
             // 暂停后的首帧只建立观察基线；外部应用可能已经改变轮次。
@@ -2402,12 +2435,12 @@ class ScreenAssistService : Service() {
         return AssistBoard.engineUnsafeReason(canonical, legalityRedGo)
     }
 
-    /** 落子核对恢复后的首张稳定画面只用于建立基线；轮次判定委托给纯逻辑策略。 */
-    private fun rebaseTurnForObservedBoard(
+    /** 落子核对恢复后的首张稳定画面必须能由已保存事务快照解释。 */
+    private fun rebaseResolutionForObserved(
         observed: Array<IntArray>,
         preBoard: Array<IntArray>?,
         expectedPostBoard: Array<IntArray>?,
-    ): Boolean = LandingRebasePolicy.redGoForObserved(
+    ): LandingRebasePolicy.Resolution = LandingRebasePolicy.resolve(
         observed = observed,
         preBoard = preBoard,
         expectedPostBoard = expectedPostBoard,
@@ -2753,6 +2786,28 @@ class ScreenAssistService : Service() {
                 )
                 return@post
             }
+            val rebaseResolution = if (isLandingRebase) {
+                rebaseResolutionForObserved(confirmed.canonical, rebasePre, rebaseExpected)
+            } else {
+                null
+            }
+            if (rebaseResolution != null && !rebaseResolution.accepted) {
+                val reason = "落子核对后的棋面与落子前/预期局面及一步合法应手均不匹配"
+                trace(
+                    "LANDING_REBASE_REJECT",
+                    "relation=${rebaseResolution.relation} " +
+                        "preMatch=${rebasePre?.let { AssistBoard.equal(it, confirmed.canonical) }} " +
+                        "expectedMatch=${rebaseExpected?.let { AssistBoard.equal(it, confirmed.canonical) }}"
+                )
+                tracker.reset(landingRebaseRedGo)
+                stableFrameWindow.rearm()
+                lastFailReason = reason
+                yoloMissStreak = maxOf(yoloMissStreak, 1)
+                setStatus("棋面无法与落子核对快照对应：$reason\n拒绝当前结果，继续重新识别…")
+                kickCapture()
+                requestWatchdog()
+                return@post
+            }
 
             // 自动模式只看屏幕下半区的帅/将。它们必须唯一且恰有一个在下半区；
             // 缺失或歧义属于坏棋面，复用异常棋面重识别流程，绝不回退猜手动颜色。
@@ -2780,7 +2835,7 @@ class ScreenAssistService : Service() {
                 SideSelectionMode.AUTO -> detectedAutoSide!!
             }
             var confirmedRedGo = when {
-                isLandingRebase -> rebaseTurnForObservedBoard(confirmed.canonical, rebasePre, rebaseExpected)
+                isLandingRebase -> rebaseResolution!!.redGo!!
                 currentCanonical == null -> sideForInitialTurn
                 else -> tracker.redGo
             }
@@ -2821,7 +2876,7 @@ class ScreenAssistService : Service() {
                     "LANDING_REBASE_BOARD",
                     "preMatch=${rebasePre?.let { AssistBoard.equal(it, confirmed.canonical) }} " +
                         "expectedMatch=${rebaseExpected?.let { AssistBoard.equal(it, confirmed.canonical) }} " +
-                        "redGo=$confirmedRedGo"
+                        "relation=${rebaseResolution?.relation} redGo=$confirmedRedGo"
                 )
                 landingRebasePending = false
                 landingRebasePreBoard = null
@@ -4426,6 +4481,10 @@ class ScreenAssistService : Service() {
      * 失败原因保留给用户，但不把旧棋面伪装成刷新成功。
      */
     private fun refreshBoardFromScreen() {
+        trace(
+            "REFRESH_REQUEST",
+            "paused=$paused manual=$manualMode detector=${yoloDetector != null} phase=${refreshPhase()}"
+        )
         if (paused) {
             setStatus("已暂停：请先点『开始』再更新棋面")
             requestRenderOnly()
@@ -4763,14 +4822,22 @@ class ScreenAssistService : Service() {
     /** 我方阵营代码，与 AssistBoard.movedSide 的约定一致：红=1、黑=0 */
     private fun mySideCode(): Int = if (mySideIsRed()) 1 else 0
 
-    private fun setStatus(text: String) {
+    private fun setStatus(text: String, onlyIfExpandedPanelVisible: Boolean = false) {
         lastStatusText = text
         trace("STATUS", text)
         // 状态文本只触发显示刷新，绝不能因为“写了一行文字”反向启动落子。
-        pendingStatusOverride = text
-        requestRenderOnly()
-        // 用户已经关掉悬浮窗连线后，不再往通知栏补投递任何内容。
-        if (overlayClosed || stopping) return
+        val panelVisible = SideSelectionPresentationPolicy.shouldRefreshExpandedPanel(
+            panelAttached = overlayPanel?.isAttachedToWindow == true,
+            collapsed = config.overlayCollapsed,
+            temporarilySuppressed = landingUiSuppressed,
+        )
+        val shouldRefreshDisplay = !onlyIfExpandedPanelVisible || panelVisible
+        if (shouldRefreshDisplay) {
+            pendingStatusOverride = text
+            requestRenderOnly()
+        }
+        // 用户已经关掉悬浮窗连线后不再更新通知；隐藏态模式变更只保存，不制造展示副作用。
+        if (overlayClosed || stopping || !shouldRefreshDisplay) return
         mainHandler.post {
             refreshForegroundNotification()
         }

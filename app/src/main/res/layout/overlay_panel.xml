@@ -4,7 +4,7 @@
     android:background="@drawable/overlay_bg" android:clickable="true" android:focusable="true"
     android:orientation="vertical" android:padding="6dp">
     <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:gravity="center_vertical" android:orientation="horizontal">
-        <TextView android:id="@+id/overlay_btn_my_side" style="@style/OverlayButton" android:layout_width="52dp" android:layout_height="26dp" android:layout_marginEnd="3dp" android:gravity="center" android:text="己方红" android:contentDescription="切换本次分析的己方颜色" />
+        <TextView android:id="@+id/overlay_btn_my_side" style="@style/OverlayButton" android:layout_width="wrap_content" android:layout_height="26dp" android:minWidth="52dp" android:maxLines="1" android:layout_marginEnd="3dp" android:gravity="center" android:text="己方红" android:contentDescription="切换本次分析的己方颜色" />
         <TextView android:id="@+id/overlay_title" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:ellipsize="end" android:maxLines="1" android:text="识盘中" android:textColor="#FFE082" android:textSize="13sp" android:textStyle="bold" />
         <TextView android:id="@+id/overlay_winrate" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginStart="4dp" android:maxLines="1" android:textColor="#9E9E9E" android:textSize="13sp" android:textStyle="bold" />
         <TextView android:id="@+id/overlay_btn_collapse" style="@style/OverlayButton" android:layout_width="46dp" android:layout_height="26dp" android:layout_marginStart="3dp" android:gravity="center" android:text="缩小" />
