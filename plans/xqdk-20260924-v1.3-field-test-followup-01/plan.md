@@ -3,9 +3,9 @@
 **任务编号**：`xqdk-20260924-v1.3-field-test-followup-01`
 **原始请求**：[request.md](request.md)，逐字保存本轮用户请求；此前三条补充分别保存在 `request-addendum-01.md` 至 `request-addendum-03.md`。
 **关联计划**：[9月24日日志卡顿、棋盘识别与引擎耗时显示调查计划](../xqdk-20260924-log-investigation-timing-plan-01/plan.md)。本计划承接该计划中自动前台暂停、双执子方和严重识别错误事项，并加入本轮实测结果，不替代既有目标。
-**项目基线**：`/workspace/XQDK`，修复前提交 `9d0e907f5335087e36f1f36baf09fe1f4dd4e3a2`；远程 `main` 和 `v1.3` 均指向该提交。已通过 GitHub 回读确认正式 `v1.3` Release（id `396061564`）公开、非草稿，标签任务 `36055583038` 与 `main` 任务 `36055579831` 均成功；两个 ARMv8 APK 和 `SHA256SUMS.txt` 状态均为已上传。为保留用户已下载的 `v1.3` 和现有远程标签，后续修复按增量补丁版本 `1.3.1` / versionCode `5` / 标签 `v1.3.1` 准备，不覆盖或强制移动 `v1.3`。
+**项目基线**：`/workspace/XQDK`，修复前提交 `9d0e907f5335087e36f1f36baf09fe1f4dd4e3a2`；修复提交 `09cc6e3882bdef10662c89d0a14437fc3338941b` 已推送到远程 `main`，`v1.3` 仍指向修复前提交且未改动。已通过 GitHub 回读确认正式 `v1.3` Release（id `396061564`）和正式 `v1.3.1` Release（id `396209996`）均公开、非草稿；`v1.3.1` 标签任务 `36082367611` 与 `main` 任务 `36082365066` 均成功。
 **测试版本证据**：用户最新实测来自修复前本地 Release `com.xiangqi.assist`、versionName `1.3`、versionCode `4`；ARMv8 SHA-256 `0f04648bedfd6bb9236868babdfdc5fdcff579cec6ccc8ca43dd2416b999c01d`，ARMv8 dotprod SHA-256 `eb5cf30e34dfd073f60b94cc4629e6aa2a446fffc263028bbf5a963c37aa81c0`。本轮修复候选已重新构建为 versionName `1.3.1`、versionCode `5`；ARMv8 SHA-256 `1590265d0a4eeaa73cdaf9acf725145caba76c35b004f1f9e3e0fbd596ca8458`，ARMv8 dotprod SHA-256 `f8f4ea4c8edfcdf461877e51468690b867c884382cb170702f678ca55e77387e`。
-**执行状态**：计划与本轮原话已落盘并复读；日志时间线已核对，落子重建门、超时进展判定、前台观察诊断、执子方按钮布局、隐藏态刷新路径和更新棋谱诊断均已完成首轮实现。ARMv8 与 ARMv8 dotprod 定向集合各 73 项通过；完整 JVM 两变体各 411 项中 8 项因 Linux/aarch64 缺少 Conscrypt 原生库失败，非本轮策略断言失败。双变体 `1.3.1` 本地 Release 与两项 `lintVital` 已通过，APK 元数据、ABI、模型资产、帮助资源和 APK v2 签名已核验；候选包与校验文件已归档。旧版 `v1.3` 已正式发布并保留；`v1.3.1` 代码提交、远程标签、GitHub Actions 正式签名和公开 Release 仍待闭合。截图逐格人工标注和真机复验仍待闭合。用户先前已授权计划完成后连续执行至发布闭环，本轮不等待计划审核。
+**执行状态**：计划与本轮原话已落盘并复读；日志时间线已核对，落子重建门、超时进展判定、前台观察诊断、执子方按钮布局、隐藏态刷新路径和更新棋谱诊断均已完成首轮实现。ARMv8 与 ARMv8 dotprod 定向集合各 73 项通过；完整 JVM 两变体各 411 项中 8 项因 Linux/aarch64 缺少 Conscrypt 原生库失败，非本轮策略断言失败。双变体 `1.3.1` 本地 Release 与两项 `lintVital` 已通过，APK 元数据、ABI、模型资产、帮助资源和 APK v2 签名已核验；候选包与校验文件已归档。旧版 `v1.3` 已正式发布并保留；修复已提交、推送并以 `v1.3.1` 标签发布，正式 Release 已回读核验。截图逐格人工标注和真机复验仍待闭合；它们不影响本轮已完成的代码交付与正式 APK 发布。
 
 ## 用户目标与约束
 
@@ -59,7 +59,8 @@
 - 更新棋谱请求入口现在记录 `REFRESH_REQUEST` 及当时门控条件，历史日志尚无该事件，故按钮是否实际到达服务仍需下一次新日志确认。
 - 定向策略/源码测试：ARMv8 与 ARMv8 dotprod 的筛选集合各 73 项，均 0 失败。完整 JVM 测试两变体各 411 项、各 8 项失败；两变体失败集合相同，均为 `AssistLaunchRobolectricTest` 的 2 项和 `OverlayChessViewRenderTest` 的 6 项，原因为当前 Linux/aarch64 环境缺少 `conscrypt_openjdk_jni-linux-aarch_64`，不是本轮策略断言失败。对应 XML 在 `app/build/test-results/testArmv8-DebugUnitTest/` 与 `app/build/test-results/testArmv8-dotprod-DebugUnitTest/`。
 - 本地 `1.3.1` 双变体 clean Release 与 `lintVitalArmv8-Release`、`lintVitalArmv8-dotprod-Release` 均通过。两个候选 APK 均为 `com.xiangqi.assist`、versionCode `5`、versionName `1.3.1`，ABI 为 `arm64-v8a` 与 `x86_64`，APK v2 签名验证通过；三档 YOLO 资产和 `assets/help.html` 已从 APK 内核验，帮助资源与源码逐字节一致。候选包归档于 `/workspace/dist-v1.3.1-candidate-20260924-r01/`，校验值为 ARMv8 `1590265d0a4eeaa73cdaf9acf725145caba76c35b004f1f9e3e0fbd596ca8458`、dotprod `f8f4ea4c8edfcdf461877e51468690b867c884382cb170702f678ca55e77387e`。
-- 旧版 `v1.3` 远程标签和公开 Release 未改动；当前工作树的修复尚未提交，远程不存在 `v1.3.1` 标签或 Release。下一原子是复核最终 diff、提交并推送 `main` 与 `v1.3.1`，再等待/核验 Actions 正式签名 APK 和公开校验文件。
+- 正式 `v1.3.1` Release 地址为 `https://github.com/Sharl210/xiangqi-assist/releases/tag/v1.3.1`，Release id `396209996`，发布于 `2026-09-25T01:36:51Z`。下载后的正式 ARMv8 APK SHA-256 为 `d0bee255e32a70cd3df09f528ca8f5b7ba3fbfe5fdc40c95a3c57e8603a23d67`，dotprod 为 `bd91650e4a16d5cec34f3b35a7eb9981a2f06b4d82e057f0d0895fc3c16a5fbb`；`SHA256SUMS.txt` 逐项校验通过。正式 APK 证书 DN 为 `C=CN, ST=Beijing, L=Beijing, O=com.zfdang.cchess, CN=Zhengfa`，证书 SHA-256 为 `f4dbd277973ca30798b84109735c2bc976afd177f87d361bc95574e781372dee`。正式资产核验目录为 `/workspace/dist-v1.3.1-release-20260925-r01/`。
+- 修复提交 `09cc6e3882bdef10662c89d0a14437fc3338941b` 已推送到 `main`，远程 `v1.3.1` 标签指向该提交；Actions `36082365066`（main）和 `36082367611`（v1.3.1）均为 `completed/success`。旧版 `v1.3` 标签、Release 和附件保持不变。
 
 ## 风险、回滚与完成标准
 
