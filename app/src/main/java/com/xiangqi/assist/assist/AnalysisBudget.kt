@@ -23,8 +23,8 @@ data class AnalysisBudget(
     init {
         require(maxDepth != null || totalTimeMs > 0) { "depth or total time is required" }
         require(totalTimeMs >= 0) { "total time cannot be negative" }
-        require(candidateCount in ThinkingOptions.MIN_CANDIDATE_COUNT..ThinkingOptions.MAX_CANDIDATE_COUNT) {
-            "candidate count out of range"
+        require(candidateCount > 0) {
+            "candidate count must be positive"
         }
         require(perCandidateTimeMs == null || perCandidateTimeMs > 0) {
             "per-candidate time must be positive"

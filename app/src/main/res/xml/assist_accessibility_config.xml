@@ -3,14 +3,14 @@
   屏幕操作通道配置。
   - canPerformGestures：唯一需要的能力，用于按坐标点按/滑动，把悬浮窗给出的着法落到屏幕上。
   - accessibilityEventTypes：只订阅窗口状态/窗口列表变化，用于识别真实全屏前台；本服务不读取界面内容。
-  - canRetrieveWindowContent 保持 false：不抓取任何应用的界面节点。
+  - canRetrieveWindowContent 开启仅用于取得活动窗口的 packageName；服务不遍历节点、不读取控件文本或应用内容。
 -->
 <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
     android:accessibilityEventTypes="typeWindowStateChanged|typeWindowsChanged"
     android:accessibilityFeedbackType="feedbackGeneric"
     android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
     android:canPerformGestures="true"
-    android:canRetrieveWindowContent="false"
+    android:canRetrieveWindowContent="true"
     android:description="@string/assist_accessibility_desc"
     android:notificationTimeout="100"
     android:summary="@string/assist_accessibility_summary" />

@@ -171,21 +171,21 @@ class CandidatePreviewPolicyTest {
     }
 
     @Test
-    fun `preview target switching gap is randomized inclusively from 750 to 1250 ms`() {
+    fun `preview target switching gap is randomized inclusively from 1250 to 2500 ms`() {
         val minimum = object : java.util.Random(1L) {
             override fun nextInt(bound: Int): Int = 0
         }
         val maximum = object : java.util.Random(1L) {
             override fun nextInt(bound: Int): Int = bound - 1
         }
-        assertEquals(750L, CandidatePreviewPolicy.randomizedPreviewSwitchGapMs(minimum))
-        assertEquals(1_250L, CandidatePreviewPolicy.randomizedPreviewSwitchGapMs(maximum))
+        assertEquals(1_250L, CandidatePreviewPolicy.randomizedPreviewSwitchGapMs(minimum))
+        assertEquals(2_500L, CandidatePreviewPolicy.randomizedPreviewSwitchGapMs(maximum))
 
         val random = java.util.Random(23L)
         val values = (0 until 1_000).map {
             CandidatePreviewPolicy.randomizedPreviewSwitchGapMs(random)
         }
-        assertTrue(values.all { it in 750L..1_250L })
+        assertTrue(values.all { it in 1_250L..2_500L })
         assertTrue(values.distinct().size > 1)
     }
 
@@ -193,10 +193,12 @@ class CandidatePreviewPolicyTest {
     fun `the next selection click is gated by the previously randomized interval`() {
         val lastClickAt = 10_000L
         assertTrue(CandidatePreviewPolicy.gapSatisfied(0L, Long.MIN_VALUE))
-        assertFalse(CandidatePreviewPolicy.gapSatisfied(10_999L, lastClickAt, 1_000L))
-        assertTrue(CandidatePreviewPolicy.gapSatisfied(11_000L, lastClickAt, 1_000L))
+        assertFalse(CandidatePreviewPolicy.gapSatisfied(11_249L, lastClickAt, 1_000L))
+        assertTrue(CandidatePreviewPolicy.gapSatisfied(11_250L, lastClickAt, 1_000L))
         assertFalse(CandidatePreviewPolicy.gapSatisfied(11_249L, lastClickAt, 1_250L))
         assertTrue(CandidatePreviewPolicy.gapSatisfied(11_250L, lastClickAt, 1_250L))
+        assertFalse(CandidatePreviewPolicy.gapSatisfied(12_499L, lastClickAt, 2_500L))
+        assertTrue(CandidatePreviewPolicy.gapSatisfied(12_500L, lastClickAt, 2_500L))
     }
 
     @Test

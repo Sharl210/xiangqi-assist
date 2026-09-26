@@ -493,10 +493,10 @@ class AssistActivity : AppCompatActivity() {
         refreshStatus()
     }
 
-    /** 识别模型选择：兼容性探测成功后才写入实际档位；负载只作为提示，不自动降级。 */
+    /** 选择识别模型。新安装默认尝试超大型，兼容性失败按超大型→大型→中型→Lite（V5保底）回退。 */
     private fun showYoloModelChooser() {
         val cfg = AssistConfig(this)
-        val tiers = YoloModelTier.values()
+        val tiers = YoloModelTier.values().filter { it.selectable }
         val labels = tiers.map { tier ->
             "${tier.displayName}：${tier.selectionHint}"
         }.toTypedArray()
@@ -507,7 +507,7 @@ class AssistActivity : AppCompatActivity() {
                 val requested = tiers[which]
                 dialog.dismiss()
                 btnYoloModel.isEnabled = false
-                tvYoloHint.text = "正在检查${requested.displayName}模型兼容性；只检查模型能否加载和执行，不按当前负载回退。"
+                tvYoloHint.text = "正在检查${requested.displayName}模型兼容性；失败时按${requested.fallbackOrder().joinToString("→") { it.displayName }}回退，不按当前负载回退。"
                 val complete: (com.xiangqi.assist.assist.YoloModelSelectionResult) -> Unit = { result ->
                     runOnUiThread {
                         btnYoloModel.isEnabled = true
@@ -525,13 +525,19 @@ class AssistActivity : AppCompatActivity() {
                     }
                 }
                 val svc = service
-                if (svc != null) {
+                if (svc != null && svc.isPrepared()) {
+                    // 已准备的服务可以后台替换 Interpreter；刷新只作用于已存在的球/面板，
+                    // 不因为模型切换重新创建悬浮窗或启动识别。
                     svc.requestYoloModelTier(requested, complete)
                 } else {
-                    // 未绑定服务时不能把“已写入偏好”冒充成兼容性探测通过。
+                    // 尚未点击“准备”时只保存用户选择，不创建服务、不拉起悬浮窗，
+                    // 兼容性检查留到下一次一键准备的同一检查链执行。
+                    cfg.yoloModelTier = requested
                     btnYoloModel.isEnabled = true
-                    tvYoloHint.text = "识别服务尚未连接，暂时无法检查设备兼容性；请稍后重试。"
-                    Toast.makeText(this, "识别服务尚未连接，未更改模型设置", Toast.LENGTH_SHORT).show()
+                    shownYoloModelMessage = "已保存${requested.displayName}模型选择；下次一键准备时检查设备兼容性。"
+                    tvYoloHint.text = shownYoloModelMessage
+                    refreshStatus()
+                    Toast.makeText(this, "已保存${requested.displayName}模型选择，下次准备时检查兼容性", Toast.LENGTH_SHORT).show()
                 }
             }
             .setNegativeButton("取消", null)
@@ -539,7 +545,7 @@ class AssistActivity : AppCompatActivity() {
     }
 
     private fun yoloHint(tier: YoloModelTier): String =
-        "${tier.selectionHint}。兼容性失败时按大型→中型→Lite回退；负载、温度和功耗不会强制回退。"
+        "${tier.selectionHint}。兼容性失败时按${tier.fallbackOrder().joinToString("→") { it.displayName }}回退；负载、温度和功耗不会强制回退。"
 
     /**
      * 落子方式开关。默认点击式：先点棋子，再点目标格；只有用户明确切换才用拖动式。

@@ -30,21 +30,20 @@ enum class ThinkingMode {
 object ThinkingOptions {
     /** 新安装默认使用总时模式；多条候选共享同一份总预算。 */
     val DEFAULT_MODE: ThinkingMode = ThinkingMode.TOTAL_TIME
-    /** 候选主变数量的用户档位：默认1，允许1..6；所有工作模式统一遵从。 */
+    /** 候选主变数量的用户档位：默认1，允许1..5；所有工作模式统一遵从。 */
     const val MIN_CANDIDATE_COUNT = 1
-    const val MAX_CANDIDATE_COUNT = 6
+    const val MAX_CANDIDATE_COUNT = 5
     const val DEFAULT_CANDIDATE_COUNT = 1
 
-    /** 单个可见时间档位最高 240 秒；不再提供 360 秒档位。 */
-    const val MAX_TIME_MS = 240_000
+    /** 单个可见时间档位最高 120 秒；旧配置读取时统一夹到120秒。 */
+    const val MAX_TIME_MS = 120_000
     const val MIN_TIME_MS = 100
-    /** 每候选模式的物理总时上限 = 240秒 × 6候选。 */
+    /** 每候选模式的物理总时上限 = 120秒 × 5候选。 */
     const val MAX_EFFECTIVE_TIME_MS = MAX_TIME_MS * MAX_CANDIDATE_COUNT
 
     val TIME_LEVELS_MS = listOf(
         100L, 1_000L, 3_000L, 5_000L, 8_000L, 16_000L,
         20_000L, 30_000L, 60_000L, 90_000L, 120_000L,
-        240_000L,
     )
 
     const val DEFAULT_TIME_MS = 3_000

@@ -1,6 +1,8 @@
 package com.xiangqi.assist.assist
 
 import com.xiangqi.assist.gamelogic.Piece
+import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.roundToInt
 import kotlin.math.sqrt
 
@@ -40,6 +42,17 @@ object DetectionBoardMapper {
         val anchorSource: AnchorSource,
         /** 自动修正（多认的棋子被剔除）的说明；空表示这一帧没被修正过 */
         val repairNotes: List<String> = emptyList(),
+        /** 同一棋盘格被不同类别的检测框同时占用；该帧不得提交为可用棋面。 */
+        val cellClassConflicts: List<CellClassConflict> = emptyList(),
+    )
+
+    data class CellClassConflict(
+        val row: Int,
+        val col: Int,
+        val firstPiece: Int,
+        val secondPiece: Int,
+        val firstScore: Double,
+        val secondScore: Double,
     )
 
     enum class AnchorSource {
@@ -91,13 +104,22 @@ object DetectionBoardMapper {
         // 裁剪图仍然使用当前画面传入的全屏网格作为几何基准；只用当前模型输出的
         // 棋子类别和中心，不让裁剪边界造成第二套“棋盘位置猜测”。
         if (preferAnchor && anchor != null) {
-            val w = anchor.x1 - anchor.x0
-            val h = anchor.y1 - anchor.y0
-            val ratio = if (h > 0) w / h else 0.0
-            if (ratio in 0.7..1.3 && w > 0 && h > 0) {
-                bx0 = anchor.x0; by0 = anchor.y0; bx1 = anchor.x1; by1 = anchor.y1
+            val refined = refineBoardGrid(anchor.x0, anchor.y0, anchor.x1, anchor.y1, pieces)
+            if (refined != null) {
+                bx0 = refined[0]; by0 = refined[1]
+                bx1 = refined[2]; by1 = refined[3]
                 anchored = true
                 source = AnchorSource.PREVIOUS_GRID
+            }
+            if (!anchored) {
+                val w = anchor.x1 - anchor.x0
+                val h = anchor.y1 - anchor.y0
+                val ratio = if (h > 0) w / h else 0.0
+                if (ratio in 0.7..1.3 && w > 0 && h > 0) {
+                    bx0 = anchor.x0; by0 = anchor.y0; bx1 = anchor.x1; by1 = anchor.y1
+                    anchored = true
+                    source = AnchorSource.PREVIOUS_GRID
+                }
             }
         }
 
@@ -107,8 +129,14 @@ object DetectionBoardMapper {
             val x1 = boardDet.cx + boardDet.w / 2
             val y1 = boardDet.cy + boardDet.h / 2
             val ratio = (x1 - x0) / (y1 - y0)
-            if (ratio in 0.7..1.3 && (x1 - x0) >= avgW * 7 && (y1 - y0) >= avgH * 8) {
-                bx0 = x0; by0 = y0; bx1 = x1; by1 = y1
+            val refined = if (ratio in 0.7..1.3 &&
+                (x1 - x0) >= avgW * 7 && (y1 - y0) >= avgH * 8
+            ) {
+                refineBoardGrid(x0, y0, x1, y1, pieces)
+            } else null
+            if (refined != null) {
+                bx0 = refined[0]; by0 = refined[1]
+                bx1 = refined[2]; by1 = refined[3]
                 anchored = true
                 source = AnchorSource.BOARD_BOX
             }
@@ -154,6 +182,7 @@ object DetectionBoardMapper {
 
         val cells = Array(AssistBoard.H) { IntArray(AssistBoard.W) }
         val cellScore = Array(AssistBoard.H) { DoubleArray(AssistBoard.W) }
+        val cellClassConflicts = LinkedHashMap<Pair<Int, Int>, CellClassConflict>()
         var dropped = 0
         var scoreSum = 0.0
         for (p in pieces) {
@@ -161,6 +190,25 @@ object DetectionBoardMapper {
             val row = ((p.cy - by0) / gridH).roundToInt()
             if (col !in 0 until AssistBoard.W || row !in 0 until AssistBoard.H) { dropped++; continue }
             val piece = p.piece
+            if (piece == Piece.EMPTY) {
+                dropped++
+                continue
+            }
+            if (cells[row][col] != Piece.EMPTY && cells[row][col] != piece) {
+                val previous = CellClassConflict(
+                    row = row,
+                    col = col,
+                    firstPiece = cells[row][col],
+                    secondPiece = piece,
+                    firstScore = cellScore[row][col],
+                    secondScore = p.score,
+                )
+                val key = row to col
+                val existing = cellClassConflicts[key]
+                if (existing == null || p.score > existing.secondScore) {
+                    cellClassConflicts[key] = previous
+                }
+            }
             if (cells[row][col] != Piece.EMPTY && cellScore[row][col] >= p.score) { dropped++; continue }
             if (cells[row][col] != Piece.EMPTY) scoreSum -= cellScore[row][col]
             cells[row][col] = piece
@@ -194,7 +242,125 @@ object DetectionBoardMapper {
             /* dropped = */ dropped + repair.notes.size,
             /* anchorSource = */ source,
             /* repairNotes = */ repair.notes,
+            /* cellClassConflicts = */ cellClassConflicts.values.toList(),
         )
+    }
+
+    private data class AxisGridFit(
+        val origin: Double,
+        val step: Double,
+        val support: Int,
+        val medianResidual: Double,
+        val penalty: Double,
+    )
+
+    /**
+     * 从 board 检测框和棋子中心拟合真实九列十行交点。
+     *
+     * 训练集里的 board 框可能包住棋盘背景边缘，而不是左上/右下两个交点。
+     * 直接把背景框等分会在相邻棋子之间制造“同格不同类别”假冲突。这里不猜棋子类别，
+     * 只在 board 框附近搜索网格原点和步长；要求多数当前检测中心同时落在同一套网格上，
+     * 否则仍回退到原有包围盒与结构安全门。
+     */
+    private fun refineBoardGrid(
+        x0: Double,
+        y0: Double,
+        x1: Double,
+        y1: Double,
+        pieces: List<YoloDetection>,
+    ): DoubleArray? {
+        val baseW = (x1 - x0) / 8.0
+        val baseH = (y1 - y0) / 9.0
+        if (baseW <= 0.0 || baseH <= 0.0 || pieces.size < 3) return null
+
+        val fitPieces = pieces.filter { p ->
+            p.cx in (x0 - baseW * 0.75)..(x1 + baseW * 0.75) &&
+                p.cy in (y0 - baseH * 0.75)..(y1 + baseH * 0.75)
+        }
+        if (fitPieces.size < 3) return null
+        val xFit = fitGridAxis(fitPieces.map { it.cx }, x0, x1, 8)
+        val yFit = fitGridAxis(fitPieces.map { it.cy }, y0, y1, 9)
+        if (xFit == null || yFit == null) return null
+
+        val supportLimit = maxOf(3, ceil(pieces.size * 0.65).toInt())
+        val residuals = fitPieces.mapNotNull { p ->
+            val col = ((p.cx - xFit.origin) / xFit.step).roundToInt()
+            val row = ((p.cy - yFit.origin) / yFit.step).roundToInt()
+            if (col !in 0..8 || row !in 0..9) return@mapNotNull null
+            val rx = abs(p.cx - (xFit.origin + col * xFit.step)) / xFit.step
+            val ry = abs(p.cy - (yFit.origin + row * yFit.step)) / yFit.step
+            maxOf(rx, ry)
+        }
+        val close = residuals.count { it <= 0.32 }
+        val median = residuals.sorted().let { values ->
+            if (values.isEmpty()) Double.POSITIVE_INFINITY else values[values.size / 2]
+        }
+        if (close < supportLimit || median > 0.32) return null
+
+        // 不允许拟合结果漂移到 board 框之外太远；这能挡住把一块按钮/面板误当棋盘。
+        if (xFit.origin > x1 + baseW * 0.75 || xFit.origin + 8 * xFit.step < x0 - baseW * 0.75 ||
+            yFit.origin > y1 + baseH * 0.75 || yFit.origin + 9 * yFit.step < y0 - baseH * 0.75
+        ) return null
+
+        return doubleArrayOf(
+            xFit.origin,
+            yFit.origin,
+            xFit.origin + 8 * xFit.step,
+            yFit.origin + 9 * yFit.step,
+        )
+    }
+
+    private fun fitGridAxis(
+        values: List<Double>,
+        board0: Double,
+        board1: Double,
+        cellCount: Int,
+    ): AxisGridFit? {
+        val base = (board1 - board0) / cellCount.toDouble()
+        if (base <= 0.0 || values.size < 3) return null
+        val minSupport = maxOf(3, ceil(values.size * 0.50).toInt())
+        var best: AxisGridFit? = null
+
+        fun consider(origin: Double, step: Double) {
+            if (!origin.isFinite() || !step.isFinite() || step <= 0.0) return
+            if (origin > board1 + base * 0.75 || origin + cellCount * step < board0 - base * 0.75) return
+            val residuals = ArrayList<Double>(values.size)
+            var support = 0
+            for (value in values) {
+                val index = ((value - origin) / step).roundToInt()
+                if (index !in 0..cellCount) continue
+                val residual = abs(value - (origin + index * step)) / step
+                residuals += residual
+                if (residual <= 0.32) support++
+            }
+            if (support < minSupport || residuals.isEmpty()) return
+            val median = residuals.sorted()[residuals.size / 2]
+            val penalty = abs(origin - board0) / base + abs(step - base) / base
+            val current = best
+            if (current == null || support > current.support ||
+                (support == current.support &&
+                    (median < current.medianResidual - 1e-6 ||
+                        (abs(median - current.medianResidual) <= 1e-6 && penalty < current.penalty)))
+            ) {
+                best = AxisGridFit(origin, step, support, median, penalty)
+            }
+        }
+
+        // board 框附近的步长/原点搜索，覆盖背景边缘和交点外接框两种标注方式。
+        for (stepIndex in 0..40) {
+            val step = base * (0.80 + stepIndex * 0.01)
+            for (shiftIndex in 0..44) {
+                val shift = -0.45 + shiftIndex * 0.025
+                consider(board0 + shift * base, step)
+            }
+            // 检测中心本身也提供候选原点，避免固定步长网格错过真实交点。
+            for (value in values) {
+                for (index in 0..cellCount) {
+                    consider(value - index * step, step)
+                }
+            }
+        }
+        return best
     }
 
     /** 双王位置判定屏幕朝向（帅在下=STANDARD，独立实现保持纯 JVM 无耦合） */

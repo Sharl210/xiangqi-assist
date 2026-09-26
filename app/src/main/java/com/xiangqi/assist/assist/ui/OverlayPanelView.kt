@@ -16,6 +16,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.xiangqi.assist.R
 import com.xiangqi.assist.assist.AssistHud
+import com.xiangqi.assist.assist.ButtonScrollAnchorPolicy
 import com.xiangqi.assist.assist.OverlayGeometry
 import kotlin.math.abs
 import kotlin.math.max
@@ -324,6 +325,13 @@ class OverlayPanelView @JvmOverloads constructor(
         buttonBar.setRowCount(
             OverlayGeometry.buttonRows(h, dp(400), dp(300))
         )
+    }
+
+    fun setButtonRowScrollState(
+        provider: (() -> ButtonScrollAnchorPolicy.Anchor?)?,
+        listener: ((ButtonScrollAnchorPolicy.Anchor) -> Unit)?,
+    ) {
+        buttonBar.setScrollState(provider, listener)
     }
 
     fun setDragHandle(

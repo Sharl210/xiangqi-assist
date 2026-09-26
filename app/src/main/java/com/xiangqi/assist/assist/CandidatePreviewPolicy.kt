@@ -23,8 +23,8 @@ object CandidatePreviewPolicy {
      * 起点点击切换到另一个预选目标时，两次点击之间的随机间隔范围。
      * 首次预选没有前一点击，不等待；每次实际派发后抽取下一次切换的间隔。
      */
-    const val MIN_PREVIEW_SWITCH_GAP_MS = 750L
-    const val MAX_PREVIEW_SWITCH_GAP_MS = 1_250L
+    const val MIN_PREVIEW_SWITCH_GAP_MS = 1_250L
+    const val MAX_PREVIEW_SWITCH_GAP_MS = 2_500L
 
     fun randomizedPreviewSwitchGapMs(random: java.util.Random): Long {
         val choices = (MAX_PREVIEW_SWITCH_GAP_MS - MIN_PREVIEW_SWITCH_GAP_MS + 1L).toInt()
@@ -34,7 +34,7 @@ object CandidatePreviewPolicy {
     /**
      * 距上一次真正派发选中点击是否已满足该次抽取的切换间隔。
      * @param lastDispatchAt 上次派发时刻；Long.MIN_VALUE 表示还没有前一点击。
-     * @param requiredGapMs 上一次派发后抽取的 750–1250ms 间隔。
+     * @param requiredGapMs 上一次派发后抽取的 1250–2500ms 间隔。
      */
     fun gapSatisfied(
         now: Long,

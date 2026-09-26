@@ -6,6 +6,7 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.HorizontalScrollView
 import android.widget.LinearLayout
+import com.xiangqi.assist.assist.ButtonScrollAnchorPolicy
 import kotlin.math.ceil
 
 /**
@@ -35,11 +36,19 @@ class OverlayButtonBar @JvmOverloads constructor(
     var rowHeightPx: Int = 0
         private set
 
-    /** 每个按钮的宽度（px）：固定宽度才能横向滚动而不是被挤压 */
-    var buttonWidthPx: Int = 0
-        private set
+    /** 滚动锚点按按钮在原始列表中的索引保存，行数改变后仍能定位到同一按钮。 */
+    private var scrollAnchorProvider: (() -> ButtonScrollAnchorPolicy.Anchor?)? = null
+    private var scrollAnchorListener: ((ButtonScrollAnchorPolicy.Anchor) -> Unit)? = null
 
-    /** 按钮之间的水平间距（px） */
+    fun setScrollState(
+        provider: (() -> ButtonScrollAnchorPolicy.Anchor?)?,
+        listener: ((ButtonScrollAnchorPolicy.Anchor) -> Unit)?,
+    ) {
+        scrollAnchorProvider = provider
+        scrollAnchorListener = listener
+        rebuild()
+    }
+
     var buttonGapPx: Int = 0
         private set
 
@@ -85,11 +94,25 @@ class OverlayButtonBar @JvmOverloads constructor(
         val perRow = ceil(items.size / rowCount.toFloat()).toInt().coerceAtLeast(1)
         var idx = 0
         for (r in 0 until rowCount) {
+            val rowStart = idx
             val row = LinearLayout(context).apply { orientation = HORIZONTAL }
             val scroll = HorizontalScrollView(context).apply {
                 isHorizontalScrollBarEnabled = false
                 overScrollMode = OVER_SCROLL_NEVER
                 addView(row, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
+                setOnScrollChangeListener { _, scrollX, _, _, _ ->
+                    if (row.childCount == 0) return@setOnScrollChangeListener
+                    val childIndex = (0 until row.childCount).firstOrNull { child ->
+                        row.getChildAt(child).right > scrollX
+                    } ?: (row.childCount - 1)
+                    val child = row.getChildAt(childIndex)
+                    scrollAnchorListener?.invoke(
+                        ButtonScrollAnchorPolicy.Anchor(
+                            buttonIndex = rowStart + childIndex,
+                            offsetWithinButtonPx = scrollX - child.left,
+                        )
+                    )
+                }
             }
             host.addView(scroll, LayoutParams(LayoutParams.MATCH_PARENT, rowH))
             var c = 0
@@ -100,6 +123,19 @@ class OverlayButtonBar @JvmOverloads constructor(
                 row.addView(b, lp)
                 idx++
                 c++
+            }
+            val rowEnd = idx
+            val anchor = scrollAnchorProvider?.invoke()
+                ?.takeIf { it.buttonIndex in rowStart until rowEnd }
+            if (anchor != null) {
+                val childIndex = anchor.buttonIndex - rowStart
+                scroll.post {
+                    val target = row.getChildAt(childIndex)
+                    scroll.scrollTo(
+                        ButtonScrollAnchorPolicy.scrollX(target.left, anchor.offsetWithinButtonPx),
+                        0,
+                    )
+                }
             }
         }
     }

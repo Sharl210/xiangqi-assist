@@ -19,9 +19,11 @@ import kotlin.math.roundToInt
 /**
  * YOLOv5 棋子检测器（Android 侧，TFLite）。
  *
- * 模型：按用户记忆的档位尝试大型→中型→Lite；每个候选都必须通过资产读取、Interpreter 创建、张量分配、
- * 输入 NHWC float32 `[1,640,640,3]`、输出 `[1,25200,20]` 和一次受控推理。当前大型档是由 XQ Medium 与 universal/旋转鲁棒模型组成的逐锚点集成模型，
- * 文件约 54.26 MiB，保留相同后处理契约；中型和 Lite 分别使用现有 `yolov5m_xq_fp32.tflite` 与 `yolov5n_xq_fp16.tflite`。
+ * 模型：按用户记忆的档位尝试超大型→大型→中型→Lite；每个候选都必须通过资产读取、Interpreter 创建、张量分配、
+ * 输入 NHWC float32 `[1,640,640,3]`、对应输出契约和一次受控推理。超大型当前没有现成工件；大型恢复既有
+ * Medium+universal/旋转鲁棒复合资源作为临时可用档，但不冒充原生大型；中型优先使用原生 YOLO26-S，
+ * Lite 保留原始 V5 作为最终保底。
+ * YOLO26-S 使用独立的 `[1,19,8400]` raw 输出解码器，不能套用旧 V5 的 `[1,25200,20]` 解码器。
  * 输入为 RGB（不是 BGR，BGR 会把红黑阵营互换）。
  * 纯推理封装：解码与棋盘映射在纯 JVM 的 YoloPostprocessor / DetectionBoardMapper 中，
  * 便于单元测试。
@@ -33,13 +35,14 @@ import kotlin.math.roundToInt
  */
 class YoloBoardDetector(
     context: Context,
-    requestedTier: YoloModelTier = YoloModelTier.LARGE,
+    requestedTier: YoloModelTier = YoloModelTier.SUPER_LARGE,
 ) {
 
     private data class RuntimeModel(
         val interpreter: Interpreter,
         val tier: YoloModelTier,
         val file: String,
+        val format: YoloModelFormat,
         val selectionResult: YoloModelSelectionResult,
     )
     private val runtimeModel = createRuntimeModel(context, requestedTier)
@@ -50,9 +53,11 @@ class YoloBoardDetector(
     val selectionResult: YoloModelSelectionResult = runtimeModel.selectionResult
     val modelTier: YoloModelTier = runtimeModel.tier
     val modelFile: String = runtimeModel.file
+    private val modelFormat: YoloModelFormat = runtimeModel.format
     private val input: ByteBuffer
     private val inputFloat: FloatArray
     private val inputFloatBuffer: FloatBuffer
+    /** 两种模型都使用三维 batch 输出；仅内层维度随模型契约不同。 */
     private val output: Array<Array<FloatArray>>
     private val workPx = IntArray(YoloPostprocessor.MODEL_INPUT * YoloPostprocessor.MODEL_INPUT)
     private val dstRect = RectF()
@@ -65,7 +70,8 @@ class YoloBoardDetector(
             .order(ByteOrder.nativeOrder())
         inputFloatBuffer = input.asFloatBuffer()
         inputFloat = FloatArray(3 * YoloPostprocessor.MODEL_INPUT * YoloPostprocessor.MODEL_INPUT)
-        output = Array(1) { Array(YoloPostprocessor.ANCHORS) { FloatArray(YoloPostprocessor.DIMS) } }
+        val outputShape = expectedOutputShape(modelFormat)
+        output = Array(1) { Array(outputShape[1]) { FloatArray(outputShape[2]) } }
     }
 
     /**
@@ -91,11 +97,12 @@ class YoloBoardDetector(
                 val outputTensor = candidate.getOutputTensor(0)
                 val inputShape = inputTensor.shape()
                 val outputShape = outputTensor.shape()
+                val expectedOutputShape = expectedOutputShape(tier.format)
                 require(inputShape.contentEquals(MODEL_INPUT_SHAPE)) {
                     "输入形状 ${inputShape.contentToString()}，需要 ${MODEL_INPUT_SHAPE.contentToString()}"
                 }
-                require(outputShape.contentEquals(MODEL_OUTPUT_SHAPE)) {
-                    "输出形状 ${outputShape.contentToString()}，需要 ${MODEL_OUTPUT_SHAPE.contentToString()}"
+                require(outputShape.contentEquals(expectedOutputShape)) {
+                    "输出形状 ${outputShape.contentToString()}，需要 ${expectedOutputShape.contentToString()}"
                 }
                 require(inputTensor.dataType() == DataType.FLOAT32) {
                     "输入类型 ${inputTensor.dataType()}，需要 FLOAT32"
@@ -107,15 +114,16 @@ class YoloBoardDetector(
                 val probeInput = ByteBuffer.allocateDirect(MODEL_INPUT_BYTES)
                     .order(ByteOrder.nativeOrder())
                 val probeOutput = Array(1) {
-                    Array(YoloPostprocessor.ANCHORS) { FloatArray(YoloPostprocessor.DIMS) }
+                    Array(expectedOutputShape[1]) { FloatArray(expectedOutputShape[2]) }
                 }
                 candidate.run(probeInput, probeOutput)
                 Log.i(TAG, "yolo model ready: tier=${tier.name} file=${tier.fileName} " +
-                    "input=${inputShape.contentToString()} output=${outputShape.contentToString()}")
+                    "format=${tier.format} input=${inputShape.contentToString()} output=${outputShape.contentToString()}")
                 return RuntimeModel(
                     interpreter = candidate,
                     tier = tier,
                     file = tier.fileName,
+                    format = tier.format,
                     selectionResult = YoloModelSelectionResult(
                         requested = requestedTier,
                         actual = tier,
@@ -176,6 +184,7 @@ class YoloBoardDetector(
         anchor: DetectionBoardMapper.AnchorHint?,
         exclude: IntArray?,
         relaxedRecovery: Boolean,
+        allowBoardZoom: Boolean = true,
     ): DetectionBoardMapper.MappedBoard? {
         val cx0: Int; val cy0: Int; val cw: Int; val ch: Int
         if (cropHint != null &&
@@ -194,19 +203,32 @@ class YoloBoardDetector(
         input.rewind()
         interpreter.run(input, output)
         val inferMs = System.currentTimeMillis() - t0
-        // 正常通道保留严格阈值；只在上一帧刚被结构/漏子门拒绝后，
-        // 才允许对同一帧做一次低置信度救援。旧棋面仍不参与识别或补子。
-        val confThreshold = if (relaxedRecovery) CRITICAL_RECOVERY_CONF_THRESHOLD else 0.45
-        val classMarginMin = if (relaxedRecovery) 0.02 else 0.05
-        val dets = YoloPostprocessor.decode(
-            output[0], lb, cw, ch,
-            confThreshold = confThreshold,
-            aspectMin = 0.50,
-            aspectMax = 1.60,
-            sizeMinFactor = 0.40,
-            sizeMaxFactor = 2.00,
-            classMarginMin = classMarginMin,
-        )
+        val dets = if (modelFormat == YoloModelFormat.YOLO26_RAW) {
+            val raw = output[0]
+            Yolo26Postprocessor.decode(
+                // TFLite output is [1,19,8400], matching the exported raw contract.
+                raw,
+                lb,
+                cw,
+                ch,
+                confThreshold = if (relaxedRecovery) 0.18 else 0.25,
+                classMarginMin = if (relaxedRecovery) 0.015 else 0.03,
+            )
+        } else {
+            // 正常通道保留严格阈值；只在上一帧刚被结构/漏子门拒绝后，
+            // 才允许对同一帧做一次低置信度救援。旧棋面仍不参与识别或补子。
+            val confThreshold = if (relaxedRecovery) CRITICAL_RECOVERY_CONF_THRESHOLD else 0.45
+            val classMarginMin = if (relaxedRecovery) 0.02 else 0.05
+            YoloPostprocessor.decode(
+                output[0], lb, cw, ch,
+                confThreshold = confThreshold,
+                aspectMin = 0.50,
+                aspectMax = 1.60,
+                sizeMinFactor = 0.40,
+                sizeMaxFactor = 2.00,
+                classMarginMin = classMarginMin,
+            )
+        }
         // 裁剪坐标 -> 帧坐标
         val shifted0 = shiftToFrame(dets, cx0, cy0)
         val shifted = excludeDetections(shifted0, exclude)
@@ -222,12 +244,20 @@ class YoloBoardDetector(
             shifted, frame.width, frame.height, anchor = anchor,
             preferAnchor = cropHint != null && anchor != null,
         )
+        if (mapped?.cellClassConflicts?.isNotEmpty() == true) {
+            val conflicts = mapped!!.cellClassConflicts.joinToString(";") { conflict ->
+                "r=${conflict.row},c=${conflict.col},piece=${conflict.firstPiece}/${conflict.secondPiece}," +
+                    "score=${"%.3f".format(conflict.firstScore)}/${"%.3f".format(conflict.secondScore)}"
+            }
+            lastDetectionSummary = "class-conflict=[$conflicts];$lastDetectionSummary"
+        }
         var criticalRecoveryUsed = false
 
-        // 皮肤或装饰差异可能让帅/将的置信度短暂跌过普通门槛。
-        // 仅在严格结果缺王时，对同一模型输出做一次较宽松的重解码；
-        // rescue 结果仍必须包含双王、通过基础结构校验，不能用旧棋面补子。
-        if (mapped == null || !hasBothKings(mapped.canonical) || relaxedRecovery) {
+        // 现代 YOLO26 原始输出没有 objectness，不能复用 YOLOv5 的 rescue 解码器。
+        if (modelFormat == YoloModelFormat.YOLOV5_XQ &&
+            (mapped == null || !hasBothKings(mapped.canonical) || relaxedRecovery) &&
+            mapped?.cellClassConflicts.isNullOrEmpty()
+        ) {
             val rescue = YoloPostprocessor.decode(
                 output[0], lb, cw, ch,
                 confThreshold = if (relaxedRecovery) 0.24 else CRITICAL_RECOVERY_CONF_THRESHOLD,
@@ -251,6 +281,34 @@ class YoloBoardDetector(
             }
         }
 
+        // 首次整屏推理时，棋盘在长屏上的实际像素高度可能只有输入图的一半，
+        // 小棋子会被模型下采样吞掉。若整屏已经给出 board 框但棋面过 sparse/缺王，
+        // 再按 board 框做一次放大 ROI 推理；第二遍仍走同一输出契约和安全门，
+        // 只在结果更完整且没有类别冲突时替换第一遍，绝不凭历史棋面补子。
+        if (allowBoardZoom && cropHint == null) {
+            val board = shifted.filter { it.isBoard }.maxByOrNull { it.score }
+            if (board != null && (mapped == null || mapped.pieceCount < BOARD_ZOOM_MIN_PIECES ||
+                    !hasBothKings(mapped.canonical))) {
+                val zoom = boardZoomHint(board, frame.width, frame.height)
+                if (zoom != null) {
+                    val zoomMapped = detectInternal(
+                        frame = frame,
+                        cropHint = zoom,
+                        anchor = anchor,
+                        exclude = exclude,
+                        relaxedRecovery = relaxedRecovery,
+                        allowBoardZoom = false,
+                    )
+                    if (isBetterZoomBoard(zoomMapped, mapped)) {
+                        mapped = zoomMapped
+                        Log.d(TAG, "yolo board zoom accepted: crop=" +
+                            zoom.joinToString(",") { "%.0f".format(it) } +
+                            " pieces=${mapped?.pieceCount ?: 0}")
+                    }
+                }
+            }
+        }
+
         lastInferMs = inferMs
         lastPieceDets = shifted.count { !it.isBoard }
         lastRawDets = shifted0.size
@@ -259,6 +317,38 @@ class YoloBoardDetector(
             "dropped=${mapped?.dropped ?: 0} anchor=${mapped?.anchorSource ?: "-"} " +
             "criticalRecovery=$criticalRecoveryUsed")
         return mapped
+    }
+
+    private fun boardZoomHint(
+        board: YoloDetection,
+        frameW: Int,
+        frameH: Int,
+    ): DoubleArray? {
+        val cellW = board.w / 8.0
+        val cellH = board.h / 9.0
+        if (!cellW.isFinite() || !cellH.isFinite() || cellW <= 0.0 || cellH <= 0.0) return null
+        // 保留约半格上下左右余量，既不裁掉边缘棋子，也尽量让棋子占满输入。
+        val x0 = (board.cx - board.w / 2.0 - cellW * 0.60).coerceAtLeast(0.0)
+        val y0 = (board.cy - board.h / 2.0 - cellH * 0.60).coerceAtLeast(0.0)
+        val x1 = (board.cx + board.w / 2.0 + cellW * 0.60).coerceAtMost(frameW.toDouble())
+        val y1 = (board.cy + board.h / 2.0 + cellH * 0.60).coerceAtMost(frameH.toDouble())
+        if (x1 - x0 < 64.0 || y1 - y0 < 64.0) return null
+        return doubleArrayOf(x0, y0, x1, y1)
+    }
+
+    private fun isBetterZoomBoard(
+        candidate: DetectionBoardMapper.MappedBoard?,
+        baseline: DetectionBoardMapper.MappedBoard?,
+    ): Boolean {
+        if (candidate == null || candidate.cellClassConflicts.isNotEmpty()) return false
+        if (baseline == null) return true
+        val candidateKings = hasBothKings(candidate.canonical)
+        val baselineKings = hasBothKings(baseline.canonical)
+        if (candidateKings != baselineKings) return candidateKings
+        if (candidate.pieceCount != baseline.pieceCount) {
+            return candidate.pieceCount > baseline.pieceCount
+        }
+        return candidate.avgScore > baseline.avgScore
     }
 
     private fun shiftToFrame(dets: List<YoloDetection>, cx0: Int, cy0: Int): List<YoloDetection> =
@@ -284,7 +374,7 @@ class YoloBoardDetector(
     }
 
     private fun isSafeRecoveredBoard(mapped: DetectionBoardMapper.MappedBoard?): Boolean {
-        if (mapped == null || !hasBothKings(mapped.canonical)) return false
+        if (mapped == null || mapped.cellClassConflicts.isNotEmpty() || !hasBothKings(mapped.canonical)) return false
         return AssistBoard.validate(mapped.canonical).isEmpty() &&
             AssistBoard.invalidPiecePlacement(mapped.canonical) == null
     }
@@ -356,7 +446,12 @@ class YoloBoardDetector(
 
     private fun loadModel(context: Context, file: String): ByteBuffer {
         context.assets.open(file).use { ins ->
-            val buf = ByteBuffer.allocateDirect(ins.available()).order(ByteOrder.nativeOrder())
+            val assetBytes = ins.available()
+            require(assetBytes > 0) { "模型资产为空" }
+            require(assetBytes.toLong() <= YoloModelTier.MAX_MODEL_BYTES) {
+                "模型文件超过${YoloModelTier.MAX_MODEL_BYTES} bytes上限（实际${assetBytes} bytes）"
+            }
+            val buf = ByteBuffer.allocateDirect(assetBytes).order(ByteOrder.nativeOrder())
             val chunk = ByteArray(64 * 1024)
             while (true) {
                 val n = ins.read(chunk)
@@ -373,8 +468,16 @@ class YoloBoardDetector(
         /** 兼容性探测要求与生产推理输入/输出保持同一类型契约。 */
         private const val MODEL_INPUT_BYTES = 4 * 3 * YoloPostprocessor.MODEL_INPUT * YoloPostprocessor.MODEL_INPUT
         private val MODEL_INPUT_SHAPE = intArrayOf(1, 640, 640, 3)
-        private val MODEL_OUTPUT_SHAPE = intArrayOf(1, 25200, 20)
+
+        private fun expectedOutputShape(format: YoloModelFormat): IntArray = when (format) {
+            YoloModelFormat.YOLOV5_XQ -> intArrayOf(1, YoloPostprocessor.ANCHORS, YoloPostprocessor.DIMS)
+            // The raw export is channel-first: [batch, 4 + 15 classes, 8400 anchors].
+            YoloModelFormat.YOLO26_RAW -> intArrayOf(1, Yolo26Postprocessor.DIMS, Yolo26Postprocessor.ANCHORS)
+        }
+
         /** 关键棋子救援只降低置信度门槛，不改变正常帧的严格门槛。 */
         private const val CRITICAL_RECOVERY_CONF_THRESHOLD = 0.30
+        /** 整屏推理少于该数量且已有 board 框时，触发一次 board ROI 放大复核。 */
+        private const val BOARD_ZOOM_MIN_PIECES = 12
     }
 }

@@ -33,9 +33,14 @@ class AssistAccessibilityService : AccessibilityService() {
         if (e.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
             e.eventType != AccessibilityEvent.TYPE_WINDOWS_CHANGED
         ) return
-        // 不直接信任事件包名：通知/权限弹窗的事件包名可能属于弹窗应用，
-        // 但真正的全屏前台仍是底下的棋盘应用。只报告当前活动的 application window。
-        emitApplicationWindow(e.windowId, e.packageName?.toString())
+        // 窗口事件包名只在确认不是系统UI、输入法或权限页后使用；对真正的
+        // WINDOW_STATE_CHANGED，它是前台切换的直接证据，窗口root只作补充。
+        val eventPackage = e.packageName?.toString()?.trim().orEmpty()
+        emitApplicationWindow(
+            windowId = e.windowId,
+            eventPackage = eventPackage.ifEmpty { null },
+            preferEventPackage = e.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED,
+        )
     }
 
     override fun onInterrupt() {
@@ -61,7 +66,11 @@ class AssistAccessibilityService : AccessibilityService() {
      * 只从当前活动的 application window 发布包名和全屏状态。
      * 事件本身可能来自通知、权限面板或输入法，不能直接把事件包名当成前台应用。
      */
-    private fun emitApplicationWindow(windowId: Int?, eventPackage: String?) {
+    private fun emitApplicationWindow(
+        windowId: Int?,
+        eventPackage: String?,
+        preferEventPackage: Boolean = false,
+    ) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.LOLLIPOP) return
         val targetAndEventMatch = runCatching {
             val applicationWindows = windows.asSequence()
@@ -72,25 +81,34 @@ class AssistAccessibilityService : AccessibilityService() {
             // 当前 active/focused application window 是前台真源；事件窗口只在 ROM
             // 没有标记活动窗口时兜底，避免后台窗口事件被误报成真实切出。
             val target = activeWindow ?: eventWindow
-            target to (eventWindow != null && target === eventWindow)
+            target
         }.getOrNull()
-        if (targetAndEventMatch == null) {
-            reportForegroundUnavailable("application-window-query-failed")
-            return
-        }
-        val target = targetAndEventMatch.first
-        if (target == null) {
-            reportForegroundUnavailable("no-active-application-window")
-            return
-        }
-        val eventWasApplicationWindow = targetAndEventMatch.second
-        // canRetrieveWindowContent=false 的 ROM 可能不给 root；只有事件本身命中
-        // application window 时，才允许把它携带的包名作为受限回退。系统通知事件
-        // 即使当前活动 application 是棋盘，也不能把通知包名冒充前台应用。
-        val packageName = runCatching { target.root?.packageName?.toString() }
-            .getOrNull()?.trim().orEmpty().ifEmpty {
-                if (eventWasApplicationWindow) eventPackage?.trim().orEmpty() else ""
+        val eventPackageName = eventPackage?.trim().orEmpty()
+        val eventPackageUsable = eventPackageName.isNotEmpty() && !isTransientPackage(eventPackageName)
+        val target = targetAndEventMatch ?: run {
+            // 部分 ROM 在 canRetrieveWindowContent=false 或窗口列表短暂为空时仍会
+            // 给出可靠的窗口状态事件包名。它只作为包名观察回退，不读取节点内容。
+            if (eventPackageUsable) {
+                globalForegroundObserver?.invoke(eventPackageName, true, null)
+            } else {
+                reportForegroundUnavailable("application-window-query-failed")
             }
+            return
+        }
+        // 对 WINDOW_STATE_CHANGED，系统事件包名是这次前台切换的直接证据；部分 ROM
+        // 会让 active window/root 暂时停留在旧窗口。事件包名仍经过瞬态系统包过滤，
+        // 因此优先使用它来建立/切换前台基准。周期探测没有事件包名时再读窗口 root。
+        val trustedEventPackage = if (preferEventPackage && eventPackageUsable) eventPackageName else ""
+        val packageName = trustedEventPackage.ifEmpty {
+            runCatching { target.root?.packageName?.toString() }
+                .getOrNull()?.trim().orEmpty()
+                .ifEmpty { runCatching { rootInActiveWindow?.packageName?.toString() }.getOrNull()?.trim().orEmpty() }
+                .ifEmpty {
+                    // 目标 application window 的 root 在部分 ROM 上始终为空，但窗口事件
+                    // 的非系统包名仍是可用的前台观察证据。过滤瞬态系统包后允许回退。
+                    if (eventPackageUsable) eventPackageName else ""
+                }
+        }
         if (packageName.isEmpty()) {
             reportForegroundUnavailable("active-window-package-unavailable")
             return
@@ -98,9 +116,16 @@ class AssistAccessibilityService : AccessibilityService() {
         val bounds = Rect()
         target.getBoundsInScreen(bounds)
         val dm = resources.displayMetrics
+        // 事件包名优先时，窗口边界可能仍是旧 ROM 窗口的边界；前台切换保护以
+        // 可信应用包名为主，不因暂时的边界缺失丢掉切换样本。边界仍保留为诊断值。
+        val fullScreen = if (trustedEventPackage.isNotEmpty()) {
+            true
+        } else {
+            isFullScreenBounds(bounds, dm.widthPixels, dm.heightPixels)
+        }
         globalForegroundObserver?.invoke(
             packageName,
-            isFullScreenBounds(bounds, dm.widthPixels, dm.heightPixels),
+            fullScreen,
             null,
         )
     }
@@ -117,6 +142,16 @@ class AssistAccessibilityService : AccessibilityService() {
     /** 关闭悬浮窗时只停用本应用这个无障碍组件，不触及系统的其它服务。 */
     fun disableSelfForSessionClose() {
         disableSelf()
+    }
+
+    private fun isTransientPackage(packageName: String): Boolean = when {
+        packageName == "android" -> true
+        packageName.startsWith("com.android.systemui") -> true
+        packageName.startsWith("com.google.android.permissioncontroller") -> true
+        packageName.startsWith("com.android.permissioncontroller") -> true
+        packageName.contains("inputmethod", ignoreCase = true) -> true
+        packageName.contains("keyboard", ignoreCase = true) -> true
+        else -> false
     }
 
     private fun isFullScreenBounds(bounds: Rect, screenW: Int, screenH: Int): Boolean {

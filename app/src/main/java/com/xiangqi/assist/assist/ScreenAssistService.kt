@@ -71,7 +71,7 @@ class ScreenAssistService : Service() {
         /** 录屏流采样周期与稳定门限由策略统一提供：每秒8个样本，连续8个样本稳定后只挑一帧送入模型。 */
         private const val STREAM_SAMPLE_PERIOD_MS = FrameStabilityPolicy.SAMPLE_PERIOD_MS
         private const val STREAM_STABLE_FRAME_COUNT = FrameStabilityPolicy.REQUIRED_STABLE_FRAMES
-        /** 蓝色候选箭头的起点预选切换目标时，每次随机等待 750–1250ms。 */
+        /** 蓝色候选箭头的起点预选切换目标时，每次随机等待 1250–2500ms。 */
         private const val CANDIDATE_PREVIEW_MIN_GAP_MS = CandidatePreviewPolicy.MIN_PREVIEW_SWITCH_GAP_MS
         /** 落子前提前把悬浮窗调透明的时间（避免点击动作按到悬浮窗上） */
         // 说明：原先"落子前提前 500ms 把悬浮窗调透明"的做法已删除。
@@ -601,7 +601,7 @@ class ScreenAssistService : Service() {
 
     /**
      * 用户切换识别模型。模型切换在后台完成：先停止接受新推理、等待在途任务退出,
-     * 再创建目标档位并按 Large→Medium→Lite 规则探测；成功后把实际档位写回设置。
+     * 再创建目标档位并按“超大型→大型→中型→V5中型回退→Lite”规则探测；成功后把实际档位写回设置。
      */
     fun requestYoloModelTier(
         requested: YoloModelTier,
@@ -617,7 +617,8 @@ class ScreenAssistService : Service() {
             sessionGrid = null
             lastFullVisionCheckAt = 0L
             yoloSelectionMessage = "正在检查${requested.displayName}模型兼容性…"
-            setStatus(yoloSelectionMessage!!)
+            setStatus(yoloSelectionMessage!!, onlyIfExpandedPanelVisible = true)
+            refreshExistingOverlayAfterModelChange()
             workerHandler.post {
                 runCatching { previous?.close() }
                 var replacement: YoloBoardDetector? = null
@@ -661,16 +662,28 @@ class ScreenAssistService : Service() {
                         yoloSelectionMessage = if (result.wasFallback) result.userMessage() else null
                         setStatus(
                             if (result.wasFallback) result.userMessage()
-                            else "已启用${ready.modelTier.displayName}模型"
+                            else "已启用${ready.modelTier.displayName}模型",
+                            onlyIfExpandedPanelVisible = true,
                         )
+                        refreshExistingOverlayAfterModelChange()
                     } else {
                         yoloSelectionMessage = result.userMessage()
-                        setStatus(result.userMessage())
+                        setStatus(result.userMessage(), onlyIfExpandedPanelVisible = true)
+                        refreshExistingOverlayAfterModelChange()
                     }
-                    postRender()
                     callback(result)
                 }
             }
+        }
+    }
+
+    /** 模型切换只刷新已经存在的悬浮形态；没有打开悬浮窗时不创建新的面板、不启动识别会话。 */
+    private fun refreshExistingOverlayAfterModelChange() {
+        if (overlayPanel != null || overlayBall != null) {
+            requestRenderOnly(createOverlayIfMissing = false)
+        } else {
+            // 未开启悬浮窗时只保留设置结果，不创建面板，也不因模型切换启动识别。
+            refreshForegroundNotification()
         }
     }
 
@@ -870,6 +883,7 @@ class ScreenAssistService : Service() {
     @Volatile private var lastAnchorSource: DetectionBoardMapper.AnchorSource? = null
     /** 最近一次识别失败的具体原因（"未见棋盘"/"棋子不足"/"映射失败"等） */
     @Volatile private var lastFailReason: String? = null
+    @Volatile private var lastRecognitionRejectReason: String? = null
     /** 状态文案节流：结构异常时每帧都会来，不能每帧都重建通知。 */
     @Volatile private var lastStatusAt: Long? = null
     /** 引擎是否正在搜索 */
@@ -1871,6 +1885,13 @@ class ScreenAssistService : Service() {
             observationAvailable = unavailableReason == null,
         )
         foregroundWindowStabilityState = observed.state
+        if (unavailableReason != null &&
+            foregroundBaselinePackage != null &&
+            !paused &&
+            foregroundPauseSnapshot == null
+        ) {
+            pauseForForegroundObservationUnavailable(unavailableReason)
+        }
         if (observedPackage != foregroundLastObservedPackage ||
             foregroundLastObservedFullScreen != isFullScreen ||
             foregroundLastObservationReason != unavailableReason ||
@@ -1900,27 +1921,19 @@ class ScreenAssistService : Service() {
             }
             is ForegroundWindowStabilityPolicy.Decision.BASELINE -> {
                 foregroundBaselinePackage = decision.packageName
-                trace("FOREGROUND_BASELINE", "package=${decision.packageName} stableFrames=${FrameStabilityPolicy.REQUIRED_STABLE_FRAMES}")
+                val snapshot = foregroundPauseSnapshot
+                if (snapshot != null && decision.packageName == snapshot.resumePackage) {
+                    handleForegroundReturnConfirmed(decision.packageName)
+                } else {
+                    trace("FOREGROUND_BASELINE", "package=${decision.packageName} stableFrames=${FrameStabilityPolicy.REQUIRED_STABLE_FRAMES}")
+                }
             }
             is ForegroundWindowStabilityPolicy.Decision.CHANGED -> {
                 val from = decision.previous
                 foregroundBaselinePackage = decision.current
                 val snapshot = foregroundPauseSnapshot
                 if (snapshot != null && decision.current == snapshot.resumePackage) {
-                    trace(
-                        "FOREGROUND_RETURN",
-                        "package=${decision.current} wasRunning=${snapshot.wasRunning} suspendedByForeground=${snapshot.suspendedByForeground}",
-                    )
-                    if (snapshot.wasRunning && snapshot.suspendedByForeground) {
-                        resumeAfterForegroundReturn(decision.current)
-                    } else {
-                        // 用户手动暂停后回到目标应用仍保持暂停；授权恢复则只在目标前台启动录屏。
-                        maybeStartCaptureAfterForegroundReturn()
-                        if (foregroundPauseSnapshot != null) {
-                            setStatus("已回到原棋盘应用，仍保持暂停；点击悬浮窗『继续』后恢复")
-                            postRender()
-                        }
-                    }
+                    handleForegroundReturnConfirmed(decision.current)
                 } else if (snapshot == null) {
                     // 授权中转页会把基准暂设为本应用；即使策略判定为普通切换，
                     // 也先尝试消费已获授权的单次令牌，匹配其原象棋目标后才启动录屏。
@@ -1948,6 +1961,43 @@ class ScreenAssistService : Service() {
 
 
     private fun packageNameForForegroundOwner(): String = packageName
+
+    /** 无法取得当前前台包名时进入安全暂停，防止录屏/自动操作继续作用于未知应用。 */
+    private fun pauseForForegroundObservationUnavailable(reason: String) {
+        val target = foregroundBaselinePackage?.trim().orEmpty()
+        if (target.isEmpty() || paused || foregroundPauseSnapshot != null) return
+        val captured = ForegroundPausePolicy.capture(
+            paused = false,
+            resumePackage = target,
+            suspendedByForeground = true,
+        ) ?: return
+        foregroundPauseSnapshot = captured
+        trace(
+            "FOREGROUND_OBSERVATION_PAUSE",
+            "reason=$reason resumePackage=$target wasRunning=${captured.wasRunning}",
+        )
+        pauseRuntime(clearAnalysis = true, preserveForegroundIntent = true)
+        setStatus("暂时无法确认前台应用（$reason）\n已安全暂停屏幕输出，确认回到原棋盘应用后自动恢复")
+        postRender()
+    }
+
+    /** 稳定确认回到原棋盘应用；兼容从不可用观察安全暂停后重新建立基准的路径。 */
+    private fun handleForegroundReturnConfirmed(returnedPackage: String) {
+        val snapshot = foregroundPauseSnapshot ?: return
+        trace(
+            "FOREGROUND_RETURN",
+            "package=$returnedPackage wasRunning=${snapshot.wasRunning} suspendedByForeground=${snapshot.suspendedByForeground}",
+        )
+        if (snapshot.wasRunning && snapshot.suspendedByForeground) {
+            resumeAfterForegroundReturn(returnedPackage)
+        } else {
+            maybeStartCaptureAfterForegroundReturn()
+            if (foregroundPauseSnapshot != null) {
+                setStatus("已回到原棋盘应用，仍保持暂停；点击悬浮窗『继续』后恢复")
+                postRender()
+            }
+        }
+    }
 
     /**
      * 前台全屏应用切走：立即停掉录屏识别、搜索和落子，但保留用户的“运行中”意图。
@@ -2480,6 +2530,15 @@ class ScreenAssistService : Service() {
             Log.w(TAG, "yolo detect failed", t)
             null
         } ?: return null
+        if (mapped.cellClassConflicts.isNotEmpty()) {
+            val summary = mapped.cellClassConflicts.joinToString(";") { conflict ->
+                "(${conflict.row},${conflict.col})=${conflict.firstPiece}/${conflict.secondPiece} " +
+                    "score=${"%.3f".format(conflict.firstScore)}/${"%.3f".format(conflict.secondScore)}"
+            }
+            lastRecognitionRejectReason = "同一棋格出现不同棋子类别候选：$summary"
+            Log.i(TAG, "vision rejected same-cell class competition: $summary")
+            return null
+        }
         if (epoch != recognitionEpoch || mapped.pieceCount < MIN_RECOGNIZED_PIECES) return null
         // 不用上一局面补子、改字或判断“哪一类更像”：此处只发布当前模型的独立结果。
         // 图像稳定性和结构校验负责运行时保险，模型自身负责字形类别。
@@ -2494,16 +2553,18 @@ class ScreenAssistService : Service() {
         if (frames.isEmpty() || stopping || overlayClosed || epoch != recognitionEpoch ||
             manualMode || (paused && !refresh.isActive)) return
         val frame = frames.first()
+        lastRecognitionRejectReason = null
         debugSaveFrameIfRequested(frame)
         val observation = recognizeFrame(frame, epoch)
         if (observation == null) {
             // 模型没有给出可用棋面：保留滑动窗口，只把释放闸门重新打开；
             // 下一个125ms样本即可再次推理，不必重新等待八个样本。
             stableFrameWindow.rearm()
-            trace("VISION_REJECT", "reason=unavailable epoch=$epoch phase=${refreshPhase()} misses=${yoloMissStreak + 1}")
+            val reason = lastRecognitionRejectReason ?: "稳定关键帧未得到可用棋面"
+            trace("VISION_REJECT", "reason=$reason epoch=$epoch phase=${refreshPhase()} misses=${yoloMissStreak + 1}")
             streamAnomalyStreak++
             yoloMissStreak++
-            lastFailReason = "稳定关键帧未得到可用棋面"
+            lastFailReason = reason
             if (streamAnomalyStreak >= STREAM_ANOMALY_GRID_RESET_MISSES) {
                 sessionGrid = null
                 lastFullVisionCheckAt = 0L
@@ -3440,6 +3501,10 @@ class ScreenAssistService : Service() {
         }
         panel.onAction = ::onOverlayAction
         panel.onCellTap = ::onManualCellTap
+        panel.setButtonRowScrollState(
+            provider = { config.overlayButtonScrollAnchor },
+            listener = { anchor -> config.overlayButtonScrollAnchor = anchor },
+        )
         // 拖动/缩放悬浮窗期间不隐藏（否则会边拖边闪）
         panel.onDragStateChange = { dragging -> userDragging = dragging }
         panel.setDragHandle(params, wm, sw, sh) { persistOverlayGeometry(params, sw, sh) }
@@ -4055,6 +4120,10 @@ class ScreenAssistService : Service() {
         }
 
         val firstStart = !runSessionStarted
+        if (firstStart) {
+            // 点击开始的这一轮优先主动取一次前台包名，确保基准对应用户点击开始时所在的应用。
+            AssistAccessibilityService.instance?.reportCurrentForegroundWindow()
+        }
         if (firstStart) {
             runtimeLogger.startSession("run_start")
             runSessionStarted = true
@@ -5969,7 +6038,7 @@ class ScreenAssistService : Service() {
     }
 
     /** 只刷新显示；不推进任何业务状态。 */
-    private fun requestRenderOnly() {
+    private fun requestRenderOnly(createOverlayIfMissing: Boolean = true) {
         if (!renderScheduled.compareAndSet(false, true)) return
         mainHandler.post {
             renderScheduled.set(false)
@@ -5977,6 +6046,10 @@ class ScreenAssistService : Service() {
             syncCaptureDemand(resolved)
             val override = pendingStatusOverride
             pendingStatusOverride = null
+            if (!createOverlayIfMissing && overlayPanel == null && overlayBall == null) {
+                refreshForegroundNotification()
+                return@post
+            }
             renderOverlay(override, resolved)
         }
     }

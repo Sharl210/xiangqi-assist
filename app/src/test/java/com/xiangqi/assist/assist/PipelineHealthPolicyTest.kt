@@ -55,14 +55,15 @@ class PipelineHealthPolicyTest {
     )
 
     @Test fun `all affected watchdog deadlines are half their previous values`() {
-        assertEquals(1_750L, PipelineHealthPolicy.LANDING_FRAME_GRACE_MS)
-        assertEquals(4_500L, PipelineHealthPolicy.LANDING_ABSOLUTE_MS)
-        assertEquals(6_000L, PipelineHealthPolicy.INFERENCE_STUCK_MS)
-        assertEquals(1_250L, PipelineHealthPolicy.STREAM_FRAME_STALL_MS)
-        assertEquals(3_000L, PipelineHealthPolicy.STREAM_STABLE_STALL_MS)
-        assertEquals(5_000L, PipelineHealthPolicy.VISION_STALL_MS)
-        assertEquals(1_250L, PipelineHealthPolicy.MIN_RECOVERY_INTERVAL_MS)
-        assertEquals(500L, PipelineHealthPolicy.FRAME_PROGRESS_KICK_MS)
+        assertEquals(875L, PipelineHealthPolicy.LANDING_FRAME_GRACE_MS)
+        assertEquals(2_250L, PipelineHealthPolicy.LANDING_ABSOLUTE_MS)
+        assertEquals(3_000L, PipelineHealthPolicy.INFERENCE_STUCK_MS)
+        assertEquals(625L, PipelineHealthPolicy.STREAM_FRAME_STALL_MS)
+        assertEquals(1_500L, PipelineHealthPolicy.STREAM_STABLE_STALL_MS)
+        assertEquals(2_500L, PipelineHealthPolicy.VISION_STALL_MS)
+        assertEquals(625L, PipelineHealthPolicy.MIN_RECOVERY_INTERVAL_MS)
+        assertEquals(250L, PipelineHealthPolicy.FRAME_PROGRESS_KICK_MS)
+        assertEquals(250L, PipelineHealthPolicy.CAPTURE_KICK_COOLDOWN_MS)
     }
 
     @Test fun `healthy pipeline and engine-only phase need no action`() {
@@ -80,18 +81,18 @@ class PipelineHealthPolicyTest {
         assertEquals(PipelineHealthPolicy.Action.NONE, PipelineHealthPolicy.evaluate(stale.copy(manualMode = true)))
     }
 
-    @Test fun `global kick is idle until 500ms then fires once per cooldown`() {
+    @Test fun `global kick is idle until two frame probe then fires once per cooldown`() {
         val last = 10_000L
-        val h = base(now = last + 499L, lastProcessedSampleAt = last, lastFrameAt = last,
+        val h = base(now = last + 249L, lastProcessedSampleAt = last, lastFrameAt = last,
             streamStartedAt = last, captureStartedAt = last,
             lastStableAt = last, lastVisionAt = last, lastRecognitionCompletedAt = last)
         assertEquals(PipelineHealthPolicy.Action.NONE, PipelineHealthPolicy.evaluate(h))
         assertEquals(PipelineHealthPolicy.Action.KICK_CAPTURE,
-            PipelineHealthPolicy.evaluate(h.copy(now = last + 500L)))
+            PipelineHealthPolicy.evaluate(h.copy(now = last + 250L)))
         assertEquals(PipelineHealthPolicy.Action.NONE,
-            PipelineHealthPolicy.evaluate(h.copy(now = last + 700L, lastCaptureKickAt = last + 500L)))
+            PipelineHealthPolicy.evaluate(h.copy(now = last + 400L, lastCaptureKickAt = last + 250L)))
         assertEquals(PipelineHealthPolicy.Action.KICK_CAPTURE,
-            PipelineHealthPolicy.evaluate(h.copy(now = last + 1_000L, lastCaptureKickAt = last + 500L)))
+            PipelineHealthPolicy.evaluate(h.copy(now = last + 500L, lastCaptureKickAt = last + 250L)))
     }
 
     @Test fun `fresh processed samples keep the global kick from clearing a stable window`() {
@@ -100,7 +101,7 @@ class PipelineHealthPolicyTest {
             lastVisionAt = now - 400L, lastRecognitionCompletedAt = now - 400L)
         assertEquals(PipelineHealthPolicy.Action.NONE, PipelineHealthPolicy.evaluate(h))
         assertEquals(PipelineHealthPolicy.Action.NONE,
-            PipelineHealthPolicy.evaluate(h.copy(now = now + 499L, lastProcessedSampleAt = now + 499L)))
+            PipelineHealthPolicy.evaluate(h.copy(now = now + 249L, lastProcessedSampleAt = now + 249L)))
     }
 
     @Test fun `recent inference after reset suppresses stale vision recovery`() {
@@ -243,7 +244,7 @@ class PipelineHealthPolicyTest {
     @Test fun `healthy in flight recognition can finish but landing absolute cap still applies`() {
         val completed = 100_000L
         val inFlight = base(
-            now = completed + 3_000L,
+            now = completed + 2_000L,
             landingStage = LandingFlow.Stage.VERIFYING,
             landingStartedAt = completed - 200L,
             landingCompletedAt = completed,

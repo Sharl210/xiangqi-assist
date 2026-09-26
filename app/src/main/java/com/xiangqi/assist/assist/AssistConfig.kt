@@ -124,7 +124,29 @@ class AssistConfig(context: Context) {
         get() = sp.getBoolean(KEY_SIM, true)
         set(value) { sp.edit().putBoolean(KEY_SIM, value).apply() }
 
-    /** 悬浮球缩放：以旧版球尺寸为 1.0，默认 0.9；为保证可见和可点击，允许 0.7..1.5。 */
+    /** 用户最后滚到的按钮锚点，按原始按钮顺序索引保存，面板重排后定位到承载该按钮的新行。 */
+    var overlayButtonScrollAnchor: ButtonScrollAnchorPolicy.Anchor?
+        get() {
+            if (!sp.contains(KEY_BUTTON_SCROLL_ANCHOR_INDEX)) return null
+            return ButtonScrollAnchorPolicy.Anchor(
+                buttonIndex = sp.getInt(KEY_BUTTON_SCROLL_ANCHOR_INDEX, 0).coerceAtLeast(0),
+                offsetWithinButtonPx = sp.getInt(KEY_BUTTON_SCROLL_ANCHOR_OFFSET, 0),
+            )
+        }
+        set(value) {
+            val editor = sp.edit()
+            if (value == null) {
+                editor.remove(KEY_BUTTON_SCROLL_ANCHOR_INDEX)
+                editor.remove(KEY_BUTTON_SCROLL_ANCHOR_OFFSET)
+            } else {
+                editor.putInt(KEY_BUTTON_SCROLL_ANCHOR_INDEX, value.buttonIndex.coerceAtLeast(0))
+                editor.putInt(KEY_BUTTON_SCROLL_ANCHOR_OFFSET, value.offsetWithinButtonPx)
+            }
+            editor.apply()
+        }
+
+
+
     var overlayBallScale: Float
         get() = sp.getFloat(KEY_BALL_SCALE, 0.9f).coerceIn(0.7f, 1.5f)
         set(value) { sp.edit().putFloat(KEY_BALL_SCALE, value.coerceIn(0.7f, 1.5f)).commit() }
@@ -155,7 +177,7 @@ class AssistConfig(context: Context) {
         get() = sp.getBoolean(KEY_AUTO_PLAY, DEFAULT_AUTO_PLAY)
         set(value) { sp.edit().putBoolean(KEY_AUTO_PLAY, value).apply() }
 
-    /** 候选主变数量：1..6；默认1。自动/指导/半自动均完全遵从此设置，不按模式偷偷改写。 */
+    /** 候选主变数量：1..5；默认1。自动/指导/半自动均完全遵从此设置，不按模式偷偷改写。 */
     var candidateCount: Int
         get() = sp.getInt(KEY_CANDIDATE_COUNT, ThinkingOptions.DEFAULT_CANDIDATE_COUNT)
             .coerceIn(ThinkingOptions.MIN_CANDIDATE_COUNT, ThinkingOptions.MAX_CANDIDATE_COUNT)
@@ -205,7 +227,7 @@ class AssistConfig(context: Context) {
         get() = sp.getBoolean(KEY_AUTO_SIDE_RED, true)
         set(value) { sp.edit().putBoolean(KEY_AUTO_SIDE_RED, value).commit() }
 
-    /** 时间模式最大思考时间，默认3秒；上限 240 秒（旧配置里的 360000 会被夹到 240000）。 */
+    /** 时间模式最大思考时间，默认3秒；上限120秒。 */
     var thinkTimeMs: Int
         get() = sp.getInt(KEY_THINK_TIME, ThinkingOptions.DEFAULT_TIME_MS)
             .coerceIn(ThinkingOptions.MIN_TIME_MS, ThinkingOptions.MAX_TIME_MS)
@@ -236,8 +258,8 @@ class AssistConfig(context: Context) {
         set(value) { sp.edit().putInt(KEY_HASH_MB, value).commit() }
 
     /**
-     * YOLO 识别模型档位。新安装默认大型；用户选择和设备兼容性回退后的实际档位都会记住。
-     * 回退只由模型能否加载/分配/执行决定，不读取瞬时负载、温度或功耗。
+     * YOLO 识别模型档位。新安装默认尝试超大型；如果没有合格工件或设备不兼容，按超大型→大型（历史复合）→中型→Lite（V5保底）回退；用户选择和实际兼容性回退后的档位都会记住。
+     * 中型优先使用 YOLO26-S；效果验收不通过时由计划恢复旧 V5 Medium。回退只由模型能否加载/分配/执行决定，不读取瞬时负载、温度或功耗。
      */
     var yoloModelTier: YoloModelTier
         get() = YoloModelTier.fromStored(
@@ -297,12 +319,14 @@ class AssistConfig(context: Context) {
         private const val KEY_RECT_Y = "overlay_rect_y"
         private const val KEY_RECT_W = "overlay_rect_w"
         private const val KEY_RECT_H = "overlay_rect_h"
-        /** 用户框选的棋盘识别范围（归一化 x/y/w/h）；未设置表示从未框选、按整屏识别。 */
+    /** 用户框选的棋盘识别范围（归一化 x/y/w/h）；未设置表示从未框选、按整屏识别。 */
         private const val KEY_BOARD_REGION_SET = "board_region_set"
         private const val KEY_BOARD_REGION_X = "board_region_x"
         private const val KEY_BOARD_REGION_Y = "board_region_y"
         private const val KEY_BOARD_REGION_W = "board_region_w"
         private const val KEY_BOARD_REGION_H = "board_region_h"
+        private const val KEY_BUTTON_SCROLL_ANCHOR_INDEX = "overlay_button_scroll_anchor_index"
+        private const val KEY_BUTTON_SCROLL_ANCHOR_OFFSET = "overlay_button_scroll_anchor_offset"
         /** 归一化坐标比较的容差，吸收浮点误差，避免"刚好贴边"被误判为非法。 */
         private const val EPS = 1e-4f
         private const val KEY_COLLAPSED = "overlay_collapsed"

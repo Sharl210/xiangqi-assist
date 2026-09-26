@@ -70,7 +70,7 @@ class DetectionBoardMapperTest {
     }
 
     @Test
-    fun `out of grid pieces are dropped and higher score wins conflicts`() {
+    fun `cross-class predictions on the same cell are flagged even if the stronger score is mapped`() {
         // 补足 minPieces 门槛的无关棋子（分散在不同格）
         val filler = listOf(
             Piece.WJU to (0.0 to 9.0), Piece.WXIANG to (2.0 to 9.0), Piece.WSHI to (3.0 to 9.0),
@@ -84,7 +84,7 @@ class DetectionBoardMapperTest {
             // 越界：屏幕顶行之外（row=-1）
             YoloDetection(labelIdOf(Piece.BSHI), 0.91,
                 boardX0 + 4 * cellW, boardY0 - cellH, pieceSize, pieceSize),
-            // 同格冲突：低分先来、高分留下
+            // 同格不同类别：映射保留强分用于诊断，但标记歧义，生产识别必须拒绝此帧。
             pieceDet(Piece.WPAO, 1.0, 7.0, score = 0.80),
             pieceDet(Piece.WMA, 1.0, 7.0, score = 0.93),
         )
@@ -94,8 +94,53 @@ class DetectionBoardMapperTest {
         assertEquals(Piece.WMA, mapped!!.screenRaw[7][1])
         assertEquals(Piece.WSHUAI, mapped.screenRaw[9][4])
         assertEquals(0, mapped.screenRaw[0][4])
-        assertEquals(1, mapped.dropped) // 越界 1（同格冲突由高分覆盖，不计丢弃）
+        assertEquals(1, mapped.dropped)
+        assertEquals(1, mapped.cellClassConflicts.size)
+        val conflict = mapped.cellClassConflicts.single()
+        assertEquals(7, conflict.row)
+        assertEquals(1, conflict.col)
+        assertEquals(Piece.WPAO, conflict.firstPiece)
+        assertEquals(Piece.WMA, conflict.secondPiece)
     }
+
+    @Test
+    fun `board frame is refined from piece centers when background frame is offset`() {
+        val pieces = listOf(
+            pieceDet(Piece.WSHUAI, 4.0, 9.0),
+            pieceDet(Piece.BJIANG, 4.0, 0.0),
+            pieceDet(Piece.WJU, 0.0, 9.0),
+            pieceDet(Piece.BJU, 8.0, 0.0),
+            pieceDet(Piece.WPAO, 1.0, 7.0),
+            pieceDet(Piece.BPAO, 7.0, 2.0),
+        )
+        val offsetBoard = YoloDetection(
+            YoloDetection.LABEL_BOARD, 0.95,
+            boardX0 + 4 * cellW + 30.0,
+            boardY0 + 4.5 * cellH + 35.0,
+            8 * cellW + 60.0,
+            9 * cellH + 70.0,
+        )
+        val mapped = DetectionBoardMapper.map(pieces + offsetBoard, frameW, frameH)
+        assertNotNull(mapped)
+        assertEquals(Piece.WSHUAI, mapped!!.screenRaw[9][4])
+        assertEquals(Piece.BJIANG, mapped.screenRaw[0][4])
+        assertTrue(mapped.cellClassConflicts.isEmpty())
+    }
+    @Test
+    fun `same-class duplicate on the same cell is not a class ambiguity`() {
+        val detections = listOf(
+            boardDet,
+            pieceDet(Piece.WSHUAI, 4.0, 9.0),
+            pieceDet(Piece.BJIANG, 4.0, 0.0),
+            pieceDet(Piece.WJU, 0.0, 9.0, score = 0.75),
+            pieceDet(Piece.WJU, 0.0, 9.0, score = 0.95),
+        )
+        val mapped = DetectionBoardMapper.map(detections, frameW, frameH)
+        assertNotNull(mapped)
+        assertEquals(Piece.WJU, mapped!!.screenRaw[9][0])
+        assertTrue(mapped.cellClassConflicts.isEmpty())
+    }
+
 
     @Test
     fun `fallback to piece bounding box when board missing`() {

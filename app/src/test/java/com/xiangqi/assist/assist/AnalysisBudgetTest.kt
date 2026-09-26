@@ -8,12 +8,12 @@ import org.junit.Test
 /** 同一棋面候选共享一份总预算，浏览候选不产生新搜索。 */
 class AnalysisBudgetTest {
     @Test
-    fun `candidate count setting is one to six and defaults to one`() {
+    fun `candidate count setting is one to five and defaults to one`() {
         assertEquals(1, ThinkingOptions.DEFAULT_CANDIDATE_COUNT)
         assertEquals(1, ThinkingOptions.MIN_CANDIDATE_COUNT)
-        assertEquals(6, ThinkingOptions.MAX_CANDIDATE_COUNT)
+        assertEquals(5, ThinkingOptions.MAX_CANDIDATE_COUNT)
         assertEquals("go movetime 3000", AnalysisBudget.forTotalTime(3_000).goCommand())
-        assertEquals(6, AnalysisBudget(null, 3_000, 6).normalized().candidateCount)
+        assertEquals(5, AnalysisBudget.forTotalTime(3_000, candidates = 6).normalized().candidateCount)
     }
     @Test
     fun `time mode emits exactly one go command with one total movetime`() {
@@ -55,15 +55,15 @@ class AnalysisBudgetTest {
     }
 
     @Test
-    fun `two hundred and forty seconds is the maximum and three hundred and sixty is clamped`() {
-        assertEquals(240_000, AnalysisBudget.forTotalTime(240_000).normalized().totalTimeMs)
-        assertEquals("go movetime 240000", AnalysisBudget.forTotalTime(240_000).goCommand())
-        // 旧配置（历史上存过 360 秒）必须被夹到 240 秒
+    fun `one hundred and twenty seconds is the maximum and legacy values are clamped`() {
+        assertEquals(120_000, AnalysisBudget.forTotalTime(120_000).normalized().totalTimeMs)
+        assertEquals("go movetime 120000", AnalysisBudget.forTotalTime(120_000).goCommand())
+        // 旧配置（历史上存过 360 秒）必须被夹到 120 秒
         val legacy = AnalysisBudget(null, 360_000)
         assertEquals(360_000, legacy.totalTimeMs)
         assertEquals("go movetime 360000", legacy.goCommand())
-        assertEquals(240_000, legacy.normalized().totalTimeMs)
-        assertEquals("go movetime 240000", legacy.normalized().goCommand())
+        assertEquals(120_000, legacy.normalized().totalTimeMs)
+        assertEquals("go movetime 120000", legacy.normalized().goCommand())
     }
 
     @Test
@@ -92,11 +92,11 @@ class AnalysisBudgetTest {
     }
 
     @Test
-    fun `temporary variation supports the extended total ceiling without changing normal total mode`() {
-        val temporary = AnalysisBudget.forEqualizedTotalTime(240_000, candidates = 2).normalized()
-        assertEquals(480_000, temporary.totalTimeMs)
-        assertEquals("go movetime 480000", temporary.goCommand())
-        assertEquals(240_000, AnalysisBudget.forTotalTime(240_000, candidates = 1).normalized().totalTimeMs)
+    fun `temporary variation uses the expanded two hundred and forty second source budget`() {
+        val temporary = AnalysisBudget.forEqualizedTotalTime(120_000, candidates = 2).normalized()
+        assertEquals(240_000, temporary.totalTimeMs)
+        assertEquals("go movetime 240000", temporary.goCommand())
+        assertEquals(120_000, AnalysisBudget.forTotalTime(120_000, candidates = 1).normalized().totalTimeMs)
     }
     @Test
     fun `depth status label uses the submitted depth budget`() {

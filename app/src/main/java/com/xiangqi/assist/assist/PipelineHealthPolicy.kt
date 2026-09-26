@@ -6,23 +6,23 @@ package com.xiangqi.assist.assist
  */
 object PipelineHealthPolicy {
     /** VERIFYING grace after the last genuinely processed/recognized image. */
-    const val LANDING_FRAME_GRACE_MS = 1_750L
+    const val LANDING_FRAME_GRACE_MS = 875L
     /** Hard cap for a gesture/verification transaction. */
-    const val LANDING_ABSOLUTE_MS = 4_500L
+    const val LANDING_ABSOLUTE_MS = 2_250L
     /** A single recognition job may legitimately run this long before the pipeline is rebuilt. */
-    const val INFERENCE_STUCK_MS = 6_000L
+    const val INFERENCE_STUCK_MS = 3_000L
     /** No ImageReader callbacks: rebuild the capture side. */
-    const val STREAM_FRAME_STALL_MS = 1_250L
+    const val STREAM_FRAME_STALL_MS = 625L
     /** Frames arrive but the stable window makes no progress. */
-    const val STREAM_STABLE_STALL_MS = 3_000L
+    const val STREAM_STABLE_STALL_MS = 1_500L
     /** No recognition completion (valid or rejected) after stable frames were produced. */
-    const val VISION_STALL_MS = 5_000L
+    const val VISION_STALL_MS = 2_500L
     /** Rate limit for destructive pipeline rebuild/reset actions. */
-    const val MIN_RECOVERY_INTERVAL_MS = 1_250L
-    /** Global quick probe: poke acquisition after 500ms without a normally processed sample. */
-    const val FRAME_PROGRESS_KICK_MS = 500L
+    const val MIN_RECOVERY_INTERVAL_MS = 625L
+    /** Global quick probe: poke acquisition after 250ms without a normally processed sample. */
+    const val FRAME_PROGRESS_KICK_MS = 250L
     /** Do not queue repeated forced acquisitions faster than the two-frame probe period. */
-    const val CAPTURE_KICK_COOLDOWN_MS = 500L
+    const val CAPTURE_KICK_COOLDOWN_MS = 250L
 
     enum class Action {
         NONE,

@@ -22,8 +22,8 @@ android {
         applicationId = "com.xiangqi.assist"
         minSdk = 26
         targetSdk = 33
-        versionCode = 5
-        versionName = "1.3.1"
+        versionCode = 6
+        versionName = "1.3.2"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")
@@ -141,7 +141,7 @@ tasks.named("preBuild") {
 dependencies {
     // https://withme.skullzbones.com/blog/programming/execute-native-binaries-android-q-no-root/
     implementation(files("$buildDir/native-libs/native-libs.jar"))
-    // YOLOv5 棋子检测推理（Large/Medium/Lite 由辅助页选择；按 Interpreter 兼容性自动向下回退）
+    // 中国象棋识别：原生 YOLO26-S 中型候选与原始 V5 Lite 保底；大型档位仅在取得合格原生工件后加入。
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("com.readystatesoftware.sqliteasset:sqliteassethelper:+")
     // https://mvnrepository.com/artifact/com.igormaznitsa/jbbp

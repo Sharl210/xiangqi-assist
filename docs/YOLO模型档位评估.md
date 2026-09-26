@@ -1,86 +1,82 @@
-# YOLO模型档位评估
+# 移动端识别模型替换评估
 
 **项目**：XQDK 象棋辅助
-**文档状态**：大型档已取得并接入；大型档采用同一 XQ 输出契约的双模型集成，不是把中型文件改名，也不是未经训练的通用 COCO 权重。真实设备上的识别质量、温升和续航仍需真机测量。
-**适用版本**：1.3（versionCode 4）
+**适用版本**：1.3.2（versionCode 6）
+**目标**：效果优先；非 Lite 档位必须有中国象棋专用训练/微调证据、Android 部署证据和同条件效果证据；单个模型文件不超过 `200,000,000 bytes`；原始 V5 Lite 固定作为最终最小兜底。
 
-## 三档结论
+- **YOLO26-S**：当前优先修复原生 YOLO26-S 中型候选；若固定评测集仍不通过，回退原始 V5 Medium。
+- **历史复合大型**：恢复既有 `yolov5l_xq_fp32.tflite` 作为临时可用档，不称原生大型；继续优化几何、后处理和识别重试链路。
+- **后续候选**：只寻找已有中国象棋成品权重，允许本地转换/量化/输出适配；禁止从零训练。
 
-- **大型**：Medium 与 universal/旋转鲁棒模型的逐锚点择优集成，输入和输出契约不变，目标是提高复杂皮肤、旋转和装饰差异下的鲁棒性。代价是同时计算两套网络，通常更慢、更耗电、更容易升温。
-- **中型**：当前单模型平衡档，速度、资源占用和识别能力居中。
-- **Lite**：资源与兼容性优先，文件更小，通常更快、更省内存；复杂皮肤下的召回需要以设备实测为准。
-- 新安装默认选择大型；已有用户保留自己的历史选择。回退只依据模型能否加载、分配张量、满足契约并执行受控推理，不依据瞬时 CPU 负载、温度、电量或当前速度。
+## 运行档位
 
-## Large 工件与来源
-
-| 档位 | APK 资产 | 大小 | SHA-256 | 输入/输出 | 状态 |
+| 运行档位 | 当前资产 | 文件大小 | SHA-256 | 输入/输出 | 状态 |
 | --- | --- | ---: | --- | --- | --- |
-| Large | `app/src/main/assets/yolov5l_xq_fp32.tflite` | 56,903,044 bytes（约54.26 MiB） | `64c8746d458247fec62ea0347dd8a2587613b87269bad9cb0a052dfa310d65e5` | `[1,640,640,3]` → `[1,25200,20]`，FLOAT32 | 已接入 |
-| Medium | `app/src/main/assets/yolov5m_xq_fp32.tflite` | 28,665,816 bytes（约27.33 MiB） | `900e32cfbee2cd6811c9e162988db86f20df16e21af2e34256a03b44259d3e5a` | `[1,640,640,3]` → `[1,25200,20]`，FLOAT32 | 已有 |
-| Lite | `app/src/main/assets/yolov5n_xq_fp16.tflite` | 3,824,480 bytes（约3.65 MiB） | `d7ebc6c3d79aeaf92e5407e56a9909d83214176a127073226cbf58b78fff9bc4` | `[1,640,640,3]` → `[1,25200,20]`，FLOAT32 输入输出契约 | 已有 |
+| 超大型 | 暂无合格原生工件 | — | — | 待取得 | 目标档位，真实探测失败后回退 |
+| 大型（历史复合） | `app/src/main/assets/yolov5l_xq_fp32.tflite` | 56,903,044 bytes | `64c8746d458247fec62ea0347dd8a2587613b87269bad9cb0a052dfa310d65e5` | `[1,640,640,3] → [1,25200,20]` FLOAT32 | 临时可用历史复合档，不称原生大型 |
+| 中型（YOLO26-S） | `app/src/main/assets/yolo26s_xq_fp32.tflite` | 38,081,200 bytes | `9dfc61756069ad232be44ab347bf5bed39e896d54e0058e4eb444bef3034dbb2` | `[1,640,640,3] → [1,19,8400]` FLOAT32 | 原生候选，先修复；效果不合格回退 V5 Medium |
+| Lite（V5保底） | `app/src/main/assets/yolov5n_xq_fp16.tflite` | 3,824,480 bytes | `d7ebc6c3d79aeaf92e5407e56a9909d83214176a127073226cbf58b78fff9bc4` | `[1,640,640,3] → [1,25200,20]` FLOAT32 | 最终最小保底 |
 
-Large 的生成脚本为 `tools/build_large_ensemble.py`。它加载当前项目使用的 Medium SavedModel 和 universal SavedModel，对每个 25,200 个检测行计算：
+用户选择与实际运行档位分开记录。回退顺序为：`SUPER_LARGE → LARGE → MEDIUM → LITE`。只有资产读取、Interpreter 创建、张量分配、输入输出契约、必要算子或一次受控推理失败时才回退；CPU负载、温度、功耗和速度只作提示。
 
-```text
-objectness × max(class_score)
-```
+## 原生 YOLO26-S 候选取证
 
-然后从两套输出中选择分数更高的整行，保持原有 15 类（14 类棋子加棋盘框）、640 输入、20 维输出和 Android 后处理契约。脚本输出的 TFLite 工件经过输入输出形状、数据类型、有限值和推理执行检查。
+### 来源与训练契约
 
-来源链来自项目已使用的 VinXiangQi 象棋 YOLO 模型及其 GPL-3.0 项目文件。中型 ONNX 源文件 SHA-256 为 `9a5fd930e521e16cd8f14463251c1738ad97fb021aaf1fcb46225f0dd2e8bd0d`；universal ONNX 源文件 SHA-256 为 `7c17bfa1b8345c8e3a07c49861a9e12e976cf349a81bd31d152e255db480e156`。发布时继续保留项目 LICENSE 与第三方来源说明。
+- 来源：公开仓库 `DuyLeTran/DeepXiangQi` 的 `Reconstruction/weights/detect-ultra.pt`。
+- 仓库 `data_detect.yaml` 声明15类：`Black_Advisor`、`Black_Bishop`、`Black_Cannon`、`Black_King`、`Black_Knight`、`Black_Pawn`、`Black_Rook`、`Red_Advisor`、`Red_Bishop`、`Red_Cannon`、`Red_King`、`Red_Knight`、`Red_Pawn`、`Red_Rook`、`board`。
+- 原始权重大小：`20,376,645 bytes`。
+- Ultralytics 元数据：YOLO26-S，约 `9,470,985` 参数、约 `20.8 GFLOPs`；这些是模型元数据，不是真机速度或功耗。
 
-这一定义需要明确：Large 是**大型集成档**，不是声称已经拥有一份独立训练的 YOLOv5-L 象棋权重。它通过同时评估两个已有的同契约模型增加推理容量和候选覆盖；最终识别质量仍以相同棋盘样本集和真机结果为准。
+### Android 工件与输出适配
 
-## 能力、速度与资源证据
+- Android 工件：`app/src/main/assets/yolo26s_xq_fp32.tflite`。
+- 文件大小：`38,081,200 bytes`，低于200 MB上限。
+- 输入：`[1,640,640,3] FLOAT32`，NHWC RGB。
+- 输出：`[1,19,8400] FLOAT32`，4个框参数加15个类别分数，没有 objectness 列。
+- `YoloModelFormat.YOLO26_RAW` 负责选择独立路径；`Yolo26Postprocessor`负责 raw 解码、类别边际门、类别感知 NMS、棋盘几何过滤和同格冲突前置保留。
+- YOLO26原始类别顺序已映射到项目既有 `YoloDetection`/`Piece` 标签契约，避免把 Black_Advisor 等新顺序误当成旧 V5 的类别ID。
+- 运行时探测按实际档位检查对应输出形状；旧 V5 路径仍检查 `[1,25200,20]`。
 
-### 已取得的当前主机实测
+### 主机转换验证
 
-测试条件：Linux/aarch64 主机、TensorFlow Lite Python Interpreter、单线程、640×640 FLOAT32 输入、同一个随机输入序列。该结果只用于比较结构开销，不能直接当作 Android 手机数据。
+- raw ONNX 与 raw TFLite 使用同一输入复核：最大绝对差约 `0.001313`，相关系数约 `1.0`。
+- 主机 TFLite Interpreter 可分配输入输出张量并执行；实际 Android `tensorflow-lite:2.14.0` 设备兼容性仍须由运行时探测和真机回传确认。
+- 当前4张异常截图上，YOLO26-S 主机单线程热身后推理约 `200–230ms`；这不是 Android P50/P95，也不是功耗结论。
 
-| 模型 | TFLite 文件 | Interpreter 算子数 | 3 次推理耗时（毫秒） | 结论 |
-| --- | ---: | ---: | --- | --- |
-| Medium | 28,665,816 bytes | 289 | 131.83 / 127.90 / 127.50 | 单模型基线 |
-| Universal | 28,665,820 bytes | 289 | 132.26 / 129.70 / 133.69 | 单模型对照 |
-| Large 集成 | 56,903,044 bytes | 540 | 264.33 / 257.58 / 257.07 | 同时计算两套模型，耗时约为单模型两倍量级 |
+### 当前样本观察
 
-Large 集成输出与“按同一输入分别运行两套模型、逐行按上述分数选择”的 Python 参考结果逐元素一致；当前测试的最大差值为 0，说明导出没有改变选择逻辑。
+- YOLO26-S 在当前4张异常图上能产生真实15类检测和棋盘框。
+- “错误的识别结果”样本仍存在同一棋格附近不同类别候选；因此同格类别冲突拒绝门必须保留，不能按最高分强行覆盖。
+- 没有同一帧集的逐格人工标注时，检测数量、置信度或模型名称都不能证明识别准确率提升。
 
-### 识别能力结论
+## 旧 Large 集成资产的边界
 
-- Large 集成不会凭模型大小自动保证准确率提升。
-- 它确实使用了两套已有 XQ 模型，并在每个候选框粒度选择更有信心的一套输出，因此设计目标是保留 Medium 的稳定结果，同时利用 universal 模型对旋转、装饰或皮肤变化的补充响应。
-- 当前没有带完整真机皮肤标注的独立测试集，不能宣称 Large 已经降低“红帅缺失”、非法棋面或识别重试率。
-- 后续应在同一输入集上记录：棋盘框召回、棋子召回与精度、双王识别率、完整合法棋面通过率、皮肤分组错误率、重试次数和恢复时间。
+`yolov5l_xq_fp32.tflite` 是既有 Medium 与 universal/旋转鲁棒模型的逐检测行集成，输入输出仍为 `[1,640,640,3] → [1,25200,20]`。它不是独立训练的 YOLOv5-L，也不是本轮要求的原生大型模型；资产、来源和构建脚本继续保留，作用是可回滚历史材料，不作为原生大型结论。
 
-### 必须真机测量的项目
+## 已排除或暂不接入的公开路线
 
-1. `Interpreter` 创建和 `allocateTensors()` 冷启动时间；
-2. 预热后连续推理的平均值、中位数、P95 和最大值；
-3. 应用进程 PSS/native heap 峰值；
-4. 连续 5 分钟、15 分钟运行的温度、电流、功耗和降频情况；
-5. Medium、Large 在相同帧集、裁剪区域、线程数、稳定帧门和后处理版本下的识别质量；
-6. 目标设备上 Large 通过兼容性探测后是否能保持稳定运行。
+- `nrl-ai/chessai` 的公开 ONNX 约35.8 MB，但输出为12维，类别契约采用7种基础棋子再用颜色二阶段判断，不是当前14种红黑棋子加棋盘框，不能直接替换。
+- `TheOne1006/chinese-chess-recognition` 的 Swin 16类布局模型可在主机 ONNX Runtime 上运行，但当前 Android TFLite 转换、动态输入布局和部署契约尚未闭合，不接入生产。
+- Roboflow 页面当前受到 Cloudflare 挑战，无法完成公开权重的可追溯下载和复核；不把无法复核的候选打进 APK。
+- VinXiangQi v1.4.0 归档中型/万能模型与当前对应模型随机输入输出逐元素等价，不能作为效果升级。
 
-## 兼容性探测与回退
+## 替换验收门
 
-运行前按用户选择向下探测：
+候选只有同时通过以下项目才可以替换对应档位：
 
-1. 读取资产；
-2. 创建 TFLite `Interpreter`；
-3. 执行 `allocateTensors()`；
-4. 检查输入 `[1,640,640,3]`、输出 `[1,25200,20]`；
-5. 检查输入输出均为 `FLOAT32`；
-6. 执行一次零输入受控推理；
-7. 任一步失败就记录原始异常并继续下一档。
+1. 权重来源、许可证、训练类别和输入输出契约可追溯；
+2. 文件实际字节数不超过 `200,000,000`；
+3. 主机 ONNX/TFLite/LiteRT 数值和后处理结果可重放；
+4. Android `Interpreter` 或 LiteRT 能真实创建、分配张量并完成受控推理；
+5. 使用同一帧集、同一裁剪、同一预处理、同一线程数和同一稳定帧门比较；
+6. 逐格类别、颜色、位置、方向和 FEN 不劣化，并对当前对应档位产生可观察效果跃迁；
+7. 双王、非法棋面、低置信类别、同格冲突和自动落子前归属安全门继续有效；
+8. 真机补测冷启动、热身、P50/P95/P99、PSS/native heap、温升、功耗、降频和连续运行稳定性；
+9. 新模型失败可回滚到已知资产和原始 V5 Lite。
 
-回退顺序为 **Large → Medium → Lite**。只要模型兼容，即使当前速度较慢或功耗较高，也不自动降档；这些因素只在 UI 中作为提示。
+## 当前交付状态
 
-模型切换先关闭旧 Detector 的生命周期闸门，等待在途推理退出，再释放 Interpreter 和位图；新档位失败时尽量恢复此前可用档位，避免服务处于半切换状态。
-
-## 参考来源
-
-- VinXiangQi 象棋模型定义：<https://github.com/Vincentzyx/VinXiangQi/blob/main/VinXiangQi/YoloXiangQiModel.cs>
-- VinXiangQi GPL-3.0 项目：<https://github.com/Vincentzyx/VinXiangQi>
-- 大型集成构建脚本：[tools/build_large_ensemble.py](../tools/build_large_ensemble.py)
-
-公开资料和主机测量只说明实现方式与开销方向，不替代目标 Android 设备上的识别、功耗和温升验收。
+- 已完成：四档目标、200 MB上限、V5 Lite最终保底、原生 YOLO26-S候选、TFLite工件、输出适配器、形状探测、类别顺序归一化和候选取证记录。
+- 未完成：固定评测集逐格标注与效果跃迁证明；原生 Large；原生 Super-Large；目标真机性能和功耗；最终Release构建、远程推送和Release资产核验。
+- 当前不能宣称：YOLO26-S已在真实设备上全面优于旧模型，或原生大型/超大型已完成替换。
