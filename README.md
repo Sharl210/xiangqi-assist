@@ -6,8 +6,8 @@
 
 ## 1.3.2 增量修复与发行
 
-- 当前发布候选：象棋辅助 1.3.2（versionCode 6），作为已公开 1.3.1（versionCode 5）的后续增量版本；`v1.3` 与 `v1.3.1` 原标签和发行附件保持不变。
-- 1.3.2 的正式发行标签为 `v1.3.2`；标签工作流负责使用仓库加密密钥构建、签名并上传两个正式 APK 与 `SHA256SUMS.txt`。
+- 正式发布：象棋辅助 1.3.2（versionCode 6），作为已公开 1.3.1（versionCode 5）的后续增量版本；`main`、`v1.3.2` 标签、双变体签名 APK 和 `SHA256SUMS.txt` 均已由远程 Actions 生成并发布；`v1.3` 与 `v1.3.1` 原标签和发行附件保持不变。
+- 1.3.2 的正式发行标签为 `v1.3.2`；正式附件以 [GitHub Release](https://github.com/Sharl210/xiangqi-assist/releases/tag/v1.3.2) 为准。
 - 当前 APK 接入原生 YOLO26-S 中国象棋15类候选，使用独立 `[1,19,8400]` raw 输出适配器；原始 V5 Lite 固定作为最终保底。大型当前可加载的是历史 Medium+universal/旋转鲁棒复合资源，明确不称原生大型；原生大型与超大型仍需来源、类别契约、Android部署和同条件效果跃迁证据。
 - 1.2、1.3、1.3.1 和 1.3.2 发布说明分别见[1.2发布说明](docs/RELEASE_1.2.md)、[1.3发布说明](docs/RELEASE_1.3.md)、[1.3.1发布说明](docs/RELEASE_1.3.1.md)与[1.3.2发布说明](docs/RELEASE_1.3.2.md)。
 
@@ -35,7 +35,7 @@
 | `xiangqi-assist-1.3.2-armv8-dotprod.apk` | 支持 ARMv8.2 dotprod 指令的设备 |
 | `SHA256SUMS.txt` | 同次 Release 生成的 APK 校验值 |
 
-正式附件会在 `v1.3.2` 标签工作流中生成；本地 APK 文件名包含构建日期，不等同于正式附件。此前正式稳定版本可在 [v1.3.1 Release](https://github.com/Sharl210/xiangqi-assist/releases/tag/v1.3.1) 获取。
+正式附件已由 `v1.3.2` 标签工作流构建、签名并发布；远程 Actions 运行 `36220239334` 成功，Release id `397101231`。两个 APK 与 `SHA256SUMS.txt` 已回读校验，APK v2签名验证通过。大型仍为标明属性的历史复合档，原生大型/超大型与真机效果未宣称完成。此前正式稳定版本可在 [v1.3.1 Release](https://github.com/Sharl210/xiangqi-assist/releases/tag/v1.3.1) 获取。
 
 ## 使用概览
 
