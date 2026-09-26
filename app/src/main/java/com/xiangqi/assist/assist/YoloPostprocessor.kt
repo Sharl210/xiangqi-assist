@@ -51,6 +51,8 @@ object YoloPostprocessor {
         sizeMaxFactor: Double = 2.20,
         /** 类别第一名相对第二名的最小置信度差；仅过滤近乎不可分辨的框。 */
         classMarginMin: Double = 0.05,
+        /** 独立棋盘框阈值；默认等于棋子阈值，仅在有界冲突复核中调低。 */
+        boardConfThreshold: Double = confThreshold,
     ): List<YoloDetection> {
         data class Raw(
             val labelId: Int,
@@ -66,7 +68,7 @@ object YoloPostprocessor {
         for (i in 0 until ANCHORS) {
             val row = output[i]
             val obj = row[4].toDouble()
-            if (obj < confThreshold) continue
+            if (obj < min(confThreshold, boardConfThreshold)) continue
             var bestCls = -1
             var bestScore = 0.0
             val classScores = ArrayList<Pair<Int, Double>>(DIMS - 5)
@@ -75,7 +77,8 @@ object YoloPostprocessor {
                 classScores += c to s
                 if (s > bestScore) { bestScore = s; bestCls = c }
             }
-            if (bestCls < 0 || bestScore < confThreshold) continue
+            val threshold = if (bestCls == YoloDetection.LABEL_BOARD) boardConfThreshold else confThreshold
+            if (bestCls < 0 || bestScore < threshold) continue
             val alternatives = classScores
                 .sortedByDescending { it.second }
                 .take(3)

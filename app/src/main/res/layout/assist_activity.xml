@@ -199,7 +199,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="10dp"
-                android:text="识别模型：High"
+                android:text="识别模型：Medium"
                 android:textAllCaps="false" />
 
             <TextView
@@ -207,7 +207,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="按效果选择 Lite / Low / Medium / High；当前会话不热切换，下次准备或开始时应用新选择。"
+                android:text="默认使用 V5 Medium；仅在模型兼容性失败时回退 V5 Lite。选择只保存配置，下次准备或开始时应用。"
                 android:textColor="@color/brand_text_secondary"
                 android:textSize="12sp" />
 

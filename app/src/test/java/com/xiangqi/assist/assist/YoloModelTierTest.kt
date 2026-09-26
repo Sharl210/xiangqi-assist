@@ -7,37 +7,28 @@ import org.junit.Test
 
 class YoloModelTierTest {
     @Test
-    fun `tiers are exposed from lite to high and fallback descends by effect priority`() {
-        assertEquals(
-            listOf("Lite", "Low", "Medium", "High"),
-            YoloModelTier.values().map { it.displayName },
-        )
-        assertEquals(
-            listOf(YoloModelTier.HIGH, YoloModelTier.MEDIUM, YoloModelTier.LOW, YoloModelTier.LITE),
-            YoloModelTier.HIGH.fallbackOrder(),
-        )
-        assertEquals(
-            listOf(YoloModelTier.MEDIUM, YoloModelTier.LOW, YoloModelTier.LITE),
-            YoloModelTier.MEDIUM.fallbackOrder(),
-        )
-        assertEquals(
-            listOf(YoloModelTier.LOW, YoloModelTier.LITE),
-            YoloModelTier.LOW.fallbackOrder(),
-        )
+    fun `only original V5 Medium and Lite are exposed`() {
+        assertEquals(listOf("Medium", "Lite"), YoloModelTier.values().map { it.displayName })
+        assertEquals("yolov5m_xq_fp32.tflite", YoloModelTier.MEDIUM.fileName)
+        assertEquals("yolov5n_xq_fp16.tflite", YoloModelTier.LITE.fileName)
+        assertEquals("MEDIUM", YoloModelTier.DEFAULT_NAME)
+        assertEquals(YoloModelTier.MEDIUM, YoloModelTier.fromStored(null))
+        assertEquals(YoloModelTier.MEDIUM, YoloModelTier.fromStored("old-value"))
+        assertTrue(YoloModelTier.MEDIUM.sampleScore > YoloModelTier.LITE.sampleScore)
+    }
+
+    @Test
+    fun `only runtime compatibility failure falls from Medium to Lite`() {
+        assertEquals(listOf(YoloModelTier.MEDIUM, YoloModelTier.LITE), YoloModelTier.MEDIUM.fallbackOrder())
         assertEquals(listOf(YoloModelTier.LITE), YoloModelTier.LITE.fallbackOrder())
     }
 
     @Test
-    fun `legacy stored values migrate to current effect labels`() {
-        assertEquals(YoloModelTier.HIGH, YoloModelTier.fromStored(null))
-        assertEquals(YoloModelTier.HIGH, YoloModelTier.fromStored("old-value"))
-        assertEquals(YoloModelTier.HIGH, YoloModelTier.fromStored("SUPER_LARGE"))
-        assertEquals(YoloModelTier.HIGH, YoloModelTier.fromStored("LARGE"))
-        assertEquals(YoloModelTier.MEDIUM, YoloModelTier.fromStored("MEDIUM"))
-        assertEquals(YoloModelTier.LOW, YoloModelTier.fromStored("MEDIUM_V5_FALLBACK"))
-        assertEquals(YoloModelTier.LOW, YoloModelTier.fromStored("LOW"))
+    fun `legacy four tier configurations migrate to V5 Medium except explicit Lite`() {
+        for (value in listOf("LOW", "MEDIUM", "MEDIUM_V5_FALLBACK", "HIGH", "LARGE", "SUPER_LARGE", "unknown")) {
+            assertEquals(value, YoloModelTier.MEDIUM, YoloModelTier.fromStored(value))
+        }
         assertEquals(YoloModelTier.LITE, YoloModelTier.fromStored("LITE"))
-        assertEquals(YoloModelTier.HIGH, YoloModelTier.fromStored("unknown"))
     }
 
     @Test
@@ -46,32 +37,21 @@ class YoloModelTierTest {
     }
 
     @Test
-    fun `fallback result exposes reason and actual tier`() {
+    fun `fallback result exposes reason and actual Lite tier`() {
         val result = YoloModelSelectionResult(
-            requested = YoloModelTier.HIGH,
-            actual = YoloModelTier.MEDIUM,
-            modelFile = YoloModelTier.MEDIUM.fileName,
-            failureReasons = listOf("High：运行时探测失败"),
+            requested = YoloModelTier.MEDIUM,
+            actual = YoloModelTier.LITE,
+            modelFile = YoloModelTier.LITE.fileName,
+            failureReasons = listOf("Medium：运行时探测失败"),
         )
         assertTrue(result.success)
         assertTrue(result.wasFallback)
-        assertTrue(result.userMessage().contains("High模型未通过设备兼容性检查"))
-        assertTrue(result.userMessage().contains("Medium模型"))
+        assertTrue(result.userMessage().contains("Medium模型未通过设备兼容性检查"))
+        assertTrue(result.userMessage().contains("Lite模型"))
     }
 
     @Test
-    fun `high tier uses restored historical ensemble asset`() {
-        assertEquals("yolov5l_xq_fp32.tflite", YoloModelTier.HIGH.fileName)
-        assertTrue(YoloModelTier.HIGH.selectionHint.contains("复合"))
-    }
-
-    @Test
-    fun `all four effect tiers are selectable`() {
-        assertTrue(YoloModelTier.values().all { it.displayName in setOf("Lite", "Low", "Medium", "High") })
-    }
-
-    @Test
-    fun `successful lite result is not a fallback`() {
+    fun `successful Lite result is not a fallback`() {
         val result = YoloModelSelectionResult(
             requested = YoloModelTier.LITE,
             actual = YoloModelTier.LITE,

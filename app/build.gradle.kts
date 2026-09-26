@@ -141,7 +141,7 @@ tasks.named("preBuild") {
 dependencies {
     // https://withme.skullzbones.com/blog/programming/execute-native-binaries-android-q-no-root/
     implementation(files("$buildDir/native-libs/native-libs.jar"))
-    // 中国象棋识别：原生 YOLO26-S 中型候选与原始 V5 Lite 保底；大型档位仅在取得合格原生工件后加入。
+    // 中国象棋识别仅保留原始 V5 Medium 主模型与原始 V5 Lite 最终回退。
     implementation("org.tensorflow:tensorflow-lite:2.14.0")
     implementation("com.readystatesoftware.sqliteasset:sqliteassethelper:+")
     // https://mvnrepository.com/artifact/com.igormaznitsa/jbbp

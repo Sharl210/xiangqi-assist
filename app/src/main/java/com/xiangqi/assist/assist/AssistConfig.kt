@@ -258,14 +258,15 @@ class AssistConfig(context: Context) {
         set(value) { sp.edit().putInt(KEY_HASH_MB, value).commit() }
 
     /**
-     * 用户选择的识别效果档位。选项按 Lite→Low→Medium→High 排列；新安装默认 High。
+     * 用户选择的识别模型：原始 V5 Medium 主模型或 V5 Lite 最终回退模型。
+     * 历史四档配置统一迁移到 Medium；明确选择 Lite 的配置保持 Lite。
      * 更换选择只保存偏好；已运行的模型会话不被即时重建，下一次准备/开始时按新选择探测并应用。
      */
     var yoloModelTier: YoloModelTier
         get() {
             val stored = sp.getString(KEY_YOLO_MODEL_TIER, null)
             val tier = YoloModelTier.fromStored(stored)
-            // 一次性迁移 v1.3.2 旧名称：SUPER_LARGE/LARGE→HIGH，V5 Medium回退→LOW。
+            // 一次性迁移旧四档配置；已退役的 YOLO26 与复合 High 统一改用 V5 Medium 主模型。
             if (stored != null && stored != tier.name) {
                 sp.edit().putString(KEY_YOLO_MODEL_TIER, tier.name).apply()
             }

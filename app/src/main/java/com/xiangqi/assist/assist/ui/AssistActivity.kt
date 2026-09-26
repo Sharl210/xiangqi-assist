@@ -493,16 +493,16 @@ class AssistActivity : AppCompatActivity() {
         refreshStatus()
     }
 
-    /** 选择识别模型。只保存用户偏好；下一次准备/开始时才按该配置探测并加载。 */
+    /** 选择识别模型。只保存用户偏好；下一次准备/开始时才按当前样本评分排序的配置探测并加载。 */
     private fun showYoloModelChooser() {
         val cfg = AssistConfig(this)
-        val tiers = YoloModelTier.values().toList()
+        val tiers = listOf(YoloModelTier.MEDIUM, YoloModelTier.LITE)
         val labels = tiers.map { tier ->
-            "${tier.displayName}：${tier.selectionHint}"
+            "${tier.displayName}：样本基线${tier.sampleScoreText()}；${tier.selectionHint}"
         }.toTypedArray()
         val current = tiers.indexOf(cfg.yoloModelTier).coerceAtLeast(0)
         AlertDialog.Builder(this)
-            .setTitle("选择识别模型效果档位")
+            .setTitle("选择识别模型")
             .setSingleChoiceItems(labels, current) { dialog, which ->
                 val requested = tiers[which]
                 dialog.dismiss()
@@ -520,7 +520,7 @@ class AssistActivity : AppCompatActivity() {
     }
 
     private fun yoloHint(tier: YoloModelTier): String =
-        "${tier.selectionHint}。兼容性失败时按${tier.fallbackOrder().joinToString("→") { it.displayName }}回退；负载、温度和功耗不会强制回退。"
+        "${tier.selectionHint}。当前10张样本基线${tier.sampleScoreText()}（有限样本安全门分数，不是准确率）；兼容性失败时按${tier.fallbackOrder().joinToString("→") { it.displayName }}回退。负载、温度和功耗不会强制回退。"
 
     /**
      * 落子方式开关。默认点击式：先点棋子，再点目标格；只有用户明确切换才用拖动式。
@@ -666,11 +666,11 @@ class AssistActivity : AppCompatActivity() {
         val modelConfig = AssistConfig(this)
         val selectedModel = modelConfig.yoloModelTier
         val activeModel = svc?.yoloModelTier()
-        btnYoloModel.text = "识别模型：${selectedModel.displayName}"
+        btnYoloModel.text = "识别模型：${selectedModel.displayName}（基线${selectedModel.sampleScoreText()}）"
         val runtimePending = prepared && activeModel != null && activeModel != selectedModel
         val modelMessage = svc?.yoloModelSelectionMessage()?.takeIf { it.isNotBlank() }
         tvYoloHint.text = when {
-            runtimePending -> "已保存${selectedModel.displayName}选择；当前会话仍用${activeModel!!.displayName}，下次准备或开始时应用新档位。"
+            runtimePending -> "已保存${selectedModel.displayName}选择；当前会话仍用${activeModel!!.displayName}，下次准备或开始时应用新模型。"
             modelMessage != null -> modelMessage
             else -> yoloHint(selectedModel)
         }

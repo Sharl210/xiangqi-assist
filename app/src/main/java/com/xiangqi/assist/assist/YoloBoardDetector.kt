@@ -19,10 +19,8 @@ import kotlin.math.roundToInt
 /**
  * YOLOv5 棋子检测器（Android 侧，TFLite）。
  *
- * 模型：按效果优先顺序尝试 High→Medium→Low→Lite；每个候选都必须通过资产读取、Interpreter 创建、张量分配、
- * 输入 NHWC float32 `[1,640,640,3]`、对应输出契约和一次受控推理。High 是历史复合资源，不冒充原生大型；
- * Medium 使用独立 YOLO26-S raw 解码器，Low 使用此前稳定 V5 Medium，Lite 保留原始 V5 作为最终保底。
- * YOLO26-S 使用独立的 `[1,19,8400]` raw 输出解码器，不能套用旧 V5 的 `[1,25200,20]` 解码器。
+ * 当前只保留原始 V5 Medium 主模型与原始 V5 Lite 最终回退；每个候选均须通过资产读取、Interpreter 创建、张量分配、
+ * 输入 NHWC float32 `[1,640,640,3]`、V5 输出契约和一次受控推理。Medium兼容失败后才尝试Lite。
  * 输入为 RGB（不是 BGR，BGR 会把红黑阵营互换）。
  * 纯推理封装：解码与棋盘映射在纯 JVM 的 YoloPostprocessor / DetectionBoardMapper 中，
  * 便于单元测试。
@@ -34,14 +32,13 @@ import kotlin.math.roundToInt
  */
 class YoloBoardDetector(
     context: Context,
-    requestedTier: YoloModelTier = YoloModelTier.HIGH,
+    requestedTier: YoloModelTier = YoloModelTier.MEDIUM,
 ) {
 
     private data class RuntimeModel(
         val interpreter: Interpreter,
         val tier: YoloModelTier,
         val file: String,
-        val format: YoloModelFormat,
         val selectionResult: YoloModelSelectionResult,
     )
     private val runtimeModel = createRuntimeModel(context, requestedTier)
@@ -52,7 +49,6 @@ class YoloBoardDetector(
     val selectionResult: YoloModelSelectionResult = runtimeModel.selectionResult
     val modelTier: YoloModelTier = runtimeModel.tier
     val modelFile: String = runtimeModel.file
-    private val modelFormat: YoloModelFormat = runtimeModel.format
     private val input: ByteBuffer
     private val inputFloat: FloatArray
     private val inputFloatBuffer: FloatBuffer
@@ -69,7 +65,7 @@ class YoloBoardDetector(
             .order(ByteOrder.nativeOrder())
         inputFloatBuffer = input.asFloatBuffer()
         inputFloat = FloatArray(3 * YoloPostprocessor.MODEL_INPUT * YoloPostprocessor.MODEL_INPUT)
-        val outputShape = expectedOutputShape(modelFormat)
+        val outputShape = expectedOutputShape()
         output = Array(1) { Array(outputShape[1]) { FloatArray(outputShape[2]) } }
     }
 
@@ -96,7 +92,7 @@ class YoloBoardDetector(
                 val outputTensor = candidate.getOutputTensor(0)
                 val inputShape = inputTensor.shape()
                 val outputShape = outputTensor.shape()
-                val expectedOutputShape = expectedOutputShape(tier.format)
+                val expectedOutputShape = expectedOutputShape()
                 require(inputShape.contentEquals(MODEL_INPUT_SHAPE)) {
                     "输入形状 ${inputShape.contentToString()}，需要 ${MODEL_INPUT_SHAPE.contentToString()}"
                 }
@@ -117,12 +113,11 @@ class YoloBoardDetector(
                 }
                 candidate.run(probeInput, probeOutput)
                 Log.i(TAG, "yolo model ready: tier=${tier.name} file=${tier.fileName} " +
-                    "format=${tier.format} input=${inputShape.contentToString()} output=${outputShape.contentToString()}")
+                    "input=${inputShape.contentToString()} output=${outputShape.contentToString()}")
                 return RuntimeModel(
                     interpreter = candidate,
                     tier = tier,
                     file = tier.fileName,
-                    format = tier.format,
                     selectionResult = YoloModelSelectionResult(
                         requested = requestedTier,
                         actual = tier,
@@ -202,32 +197,19 @@ class YoloBoardDetector(
         input.rewind()
         interpreter.run(input, output)
         val inferMs = System.currentTimeMillis() - t0
-        val dets = if (modelFormat == YoloModelFormat.YOLO26_RAW) {
-            val raw = output[0]
-            Yolo26Postprocessor.decode(
-                // TFLite output is [1,19,8400], matching the exported raw contract.
-                raw,
-                lb,
-                cw,
-                ch,
-                confThreshold = if (relaxedRecovery) 0.18 else 0.25,
-                classMarginMin = if (relaxedRecovery) 0.015 else 0.03,
-            )
-        } else {
-            // 正常通道保留严格阈值；只在上一帧刚被结构/漏子门拒绝后，
-            // 才允许对同一帧做一次低置信度救援。旧棋面仍不参与识别或补子。
-            val confThreshold = if (relaxedRecovery) CRITICAL_RECOVERY_CONF_THRESHOLD else 0.45
-            val classMarginMin = if (relaxedRecovery) 0.02 else 0.05
-            YoloPostprocessor.decode(
-                output[0], lb, cw, ch,
-                confThreshold = confThreshold,
-                aspectMin = 0.50,
-                aspectMax = 1.60,
-                sizeMinFactor = 0.40,
-                sizeMaxFactor = 2.00,
-                classMarginMin = classMarginMin,
-            )
-        }
+        // 正常通道保留严格阈值；只在上一帧刚被结构/漏子门拒绝后，
+        // 才允许对同一帧做一次低置信度救援。旧棋面仍不参与识别或补子。
+        val confThreshold = if (relaxedRecovery) CRITICAL_RECOVERY_CONF_THRESHOLD else 0.45
+        val classMarginMin = if (relaxedRecovery) 0.02 else 0.05
+        val dets = YoloPostprocessor.decode(
+            output[0], lb, cw, ch,
+            confThreshold = confThreshold,
+            aspectMin = 0.50,
+            aspectMax = 1.60,
+            sizeMinFactor = 0.40,
+            sizeMaxFactor = 2.00,
+            classMarginMin = classMarginMin,
+        )
         // 裁剪坐标 -> 帧坐标
         val shifted0 = shiftToFrame(dets, cx0, cy0)
         val shifted = excludeDetections(shifted0, exclude)
@@ -252,9 +234,37 @@ class YoloBoardDetector(
         }
         var criticalRecoveryUsed = false
 
-        // 现代 YOLO26 原始输出没有 objectness，不能复用 YOLOv5 的 rescue 解码器。
-        if (modelFormat == YoloModelFormat.YOLOV5_XQ &&
-            (mapped == null || !hasBothKings(mapped.canonical) || relaxedRecovery) &&
+        // Lite 兜底模型在当前样本中有低分异类框与高分真框落在同一格的情况。
+        // 只在已有冲突时，用同一帧、同一原始输出做一次较严格置信阈值复核；候选必须无冲突、
+        // 双王恰各一枚、棋面合法，且修复后的棋子数不得少于安全门映射基线，才允许替换。
+        // 这是基于模型自己的低分候选过滤，不借用旧棋面，也不改变Medium正常阈值。
+        if (modelTier == YoloModelTier.LITE && mapped?.cellClassConflicts?.isNotEmpty() == true) {
+            val baselinePieceCount = mapped!!.pieceCount
+            val conservativeDetections = YoloPostprocessor.decode(
+                output[0], lb, cw, ch,
+                confThreshold = LITE_CONFLICT_RECOVERY_CONF_THRESHOLD,
+                aspectMin = 0.50,
+                aspectMax = 1.60,
+                sizeMinFactor = 0.40,
+                sizeMaxFactor = 2.00,
+                classMarginMin = 0.05,
+                boardConfThreshold = LITE_RECOVERY_BOARD_CONF_THRESHOLD,
+            )
+            val conservativeMapped = DetectionBoardMapper.map(
+                excludeDetections(shiftToFrame(conservativeDetections, cx0, cy0), exclude),
+                frame.width, frame.height, anchor = anchor,
+                preferAnchor = cropHint != null && anchor != null,
+            )
+            if (isSafeRecoveredBoard(conservativeMapped) &&
+                conservativeMapped!!.pieceCount >= baselinePieceCount
+            ) {
+                mapped = conservativeMapped
+                lastDetectionSummary = "lite-conflict-recovery=0.55;$lastDetectionSummary"
+            }
+        }
+
+        // 缺王/无棋面时可进行一次低置信度救援；所有候选仍须通过双王、冲突、棋面结构安全门。
+        if ((mapped == null || !hasBothKings(mapped.canonical) || relaxedRecovery) &&
             mapped?.cellClassConflicts.isNullOrEmpty()
         ) {
             val rescue = YoloPostprocessor.decode(
@@ -287,7 +297,8 @@ class YoloBoardDetector(
         if (allowBoardZoom && cropHint == null) {
             val board = shifted.filter { it.isBoard }.maxByOrNull { it.score }
             if (board != null && (mapped == null || mapped.pieceCount < BOARD_ZOOM_MIN_PIECES ||
-                    !hasBothKings(mapped.canonical))) {
+                    !hasBothKings(mapped.canonical) || mapped.cellClassConflicts.isNotEmpty())
+            ) {
                 val zoom = boardZoomHint(board, frame.width, frame.height)
                 if (zoom != null) {
                     val zoomMapped = detectInternal(
@@ -304,6 +315,31 @@ class YoloBoardDetector(
                             zoom.joinToString(",") { "%.0f".format(it) } +
                             " pieces=${mapped?.pieceCount ?: 0}")
                     }
+                }
+            }
+        }
+        // 棋盘类别漏检时，若当前帧的棋子中心已形成可靠包围盒格网，基于该格网做一次安全放大复核。
+        // 该候选不直接提交；只有二次推理得到双王、无同格冲突且结构合法的棋面才可替换。
+        if (allowBoardZoom && cropHint == null && shifted.none { it.isBoard } &&
+            (mapped == null || !isSafeRecoveredBoard(mapped))
+        ) {
+            val recovery = DetectionRecoveryCropPolicy.fromPieceBoundingGrid(
+                mapped, frame.width, frame.height,
+            )
+            if (recovery != null) {
+                val zoomMapped = detectInternal(
+                    frame = frame,
+                    cropHint = recovery.rect,
+                    anchor = recovery.anchor,
+                    exclude = exclude,
+                    relaxedRecovery = relaxedRecovery,
+                    allowBoardZoom = false,
+                )
+                if (isSafeRecoveredBoard(zoomMapped) && isBetterZoomBoard(zoomMapped, mapped)) {
+                    mapped = zoomMapped
+                    Log.d(TAG, "yolo piece-grid recovery accepted: crop=" +
+                        recovery.rect.joinToString(",") { "%.0f".format(it) } +
+                        " pieces=${mapped?.pieceCount ?: 0}")
                 }
             }
         }
@@ -339,11 +375,17 @@ class YoloBoardDetector(
         candidate: DetectionBoardMapper.MappedBoard?,
         baseline: DetectionBoardMapper.MappedBoard?,
     ): Boolean {
-        if (candidate == null || candidate.cellClassConflicts.isNotEmpty()) return false
+        if (candidate == null || candidate.cellClassConflicts.isNotEmpty() || !isSafeRecoveredBoard(candidate)) return false
         if (baseline == null) return true
         val candidateKings = hasBothKings(candidate.canonical)
         val baselineKings = hasBothKings(baseline.canonical)
         if (candidateKings != baselineKings) return candidateKings
+        val candidateSafe = isSafeRecoveredBoard(candidate)
+        val baselineSafe = isSafeRecoveredBoard(baseline)
+        if (candidateSafe != baselineSafe) return candidateSafe
+        if (candidate.cellClassConflicts.isEmpty() && baseline.cellClassConflicts.isNotEmpty()) {
+            return candidateSafe
+        }
         if (candidate.pieceCount != baseline.pieceCount) {
             return candidate.pieceCount > baseline.pieceCount
         }
@@ -468,12 +510,13 @@ class YoloBoardDetector(
         private const val MODEL_INPUT_BYTES = 4 * 3 * YoloPostprocessor.MODEL_INPUT * YoloPostprocessor.MODEL_INPUT
         private val MODEL_INPUT_SHAPE = intArrayOf(1, 640, 640, 3)
 
-        private fun expectedOutputShape(format: YoloModelFormat): IntArray = when (format) {
-            YoloModelFormat.YOLOV5_XQ -> intArrayOf(1, YoloPostprocessor.ANCHORS, YoloPostprocessor.DIMS)
-            // The raw export is channel-first: [batch, 4 + 15 classes, 8400 anchors].
-            YoloModelFormat.YOLO26_RAW -> intArrayOf(1, Yolo26Postprocessor.DIMS, Yolo26Postprocessor.ANCHORS)
-        }
+        private fun expectedOutputShape(): IntArray =
+            intArrayOf(1, YoloPostprocessor.ANCHORS, YoloPostprocessor.DIMS)
 
+        /** Lite同格冲突复核允许低置信棋盘框，棋子框仍使用0.55严格阈值。 */
+        private const val LITE_RECOVERY_BOARD_CONF_THRESHOLD = 0.20
+        /** Lite同格冲突救援阈值：只过滤低分候选，不覆盖未冲突结果。 */
+        private const val LITE_CONFLICT_RECOVERY_CONF_THRESHOLD = 0.55
         /** 关键棋子救援只降低置信度门槛，不改变正常帧的严格门槛。 */
         private const val CRITICAL_RECOVERY_CONF_THRESHOLD = 0.30
         /** 整屏推理少于该数量且已有 board 框时，触发一次 board ROI 放大复核。 */

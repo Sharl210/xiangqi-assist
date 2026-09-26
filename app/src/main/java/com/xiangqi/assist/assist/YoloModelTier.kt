@@ -1,64 +1,47 @@
 package com.xiangqi.assist.assist
 
 /**
- * 模型输出契约。不同架构不能只改文件名后复用旧解码器。
- */
-enum class YoloModelFormat {
-    YOLOV5_XQ,
-    YOLO26_RAW,
-}
-
-/**
- * 移动端识别档位按可用效果路线从低到高排列。
- * Lite 固定为原始 V5 最终兜底；Low 为此前稳定的 V5 Medium；Medium 为 YOLO26-S 候选；
- * High 暂用历史 Medium+universal 复合资源，名称只表示当前最高优先档，不宣称已证明效果胜过其他档，也不称原生大型。
+ * 当前产品仅保留两份原始中国象棋 V5 权重：Medium 为默认主模型，Lite 为兼容性最终回退。
+ * 分数是当前10张实验样本的安全门基线，不是逐格准确率或通用 mAP；逐格标注前不得宣称无误。
  */
 enum class YoloModelTier(
     val displayName: String,
     val fileName: String,
-    val format: YoloModelFormat,
     val selectionHint: String,
+    /** 当前10张样本上的安全门基线，不是通用准确率。 */
+    val sampleScore: Double,
 ) {
+    MEDIUM(
+        displayName = "Medium",
+        fileName = "yolov5m_xq_fp32.tflite",
+        selectionHint = "原始 V5 Medium，中国象棋主模型；当前基线7/10样本通过安全门，正在继续优化",
+        sampleScore = 78.1,
+    ),
     LITE(
         displayName = "Lite",
         fileName = "yolov5n_xq_fp16.tflite",
-        format = YoloModelFormat.YOLOV5_XQ,
-        selectionHint = "原始 V5 Lite 最终兜底；模型最小，优先兼容与资源占用",
-    ),
-    LOW(
-        displayName = "Low",
-        fileName = "yolov5m_xq_fp32.tflite",
-        format = YoloModelFormat.YOLOV5_XQ,
-        selectionHint = "此前稳定的原始 V5 Medium；用作较低效果优先档和 YOLO26-S 运行时回退",
-    ),
-    MEDIUM(
-        displayName = "Medium",
-        fileName = "yolo26s_xq_fp32.tflite",
-        format = YoloModelFormat.YOLO26_RAW,
-        selectionHint = "原生 YOLO26-S 中国象棋15类候选；逐格效果仍在验证",
-    ),
-    HIGH(
-        displayName = "High",
-        fileName = "yolov5l_xq_fp32.tflite",
-        format = YoloModelFormat.YOLOV5_XQ,
-        selectionHint = "当前最高优先档，使用历史 Medium+universal 复合资源；不是原生大型权重，实际效果需用固定样本验证",
+        selectionHint = "原始 V5 Lite，Medium兼容性失败时的最终回退；当前基线4/10样本通过安全门",
+        sampleScore = 67.2,
     );
 
-    /** 从所选档位向兼容性要求更低的档位回退；枚举本身按 Lite→High 排列。 */
-    fun fallbackOrder(): List<YoloModelTier> = values().take(ordinal + 1).asReversed()
+    fun sampleScoreText(): String = "${sampleScore}/100"
+
+    /** 仅在模型运行时兼容性检查失败时按 Medium→Lite 回退；Lite 不再反向切回主模型。 */
+    fun fallbackOrder(): List<YoloModelTier> = when (this) {
+        MEDIUM -> listOf(MEDIUM, LITE)
+        LITE -> listOf(LITE)
+    }
 
     companion object {
         const val MAX_MODEL_BYTES = 200_000_000L
-        const val DEFAULT_NAME = "HIGH"
+        const val DEFAULT_NAME = "MEDIUM"
 
-        /** v1.3.2 的旧枚举值继续读取；旧超大型/大型选择迁移至当前 High 档。 */
+        /** 历史四档配置统一映射到现有主模型；明确的 Lite 配置继续保留。 */
         fun fromStored(value: String?): YoloModelTier = when (value) {
-            null, "", "old-value" -> HIGH
             "LITE" -> LITE
-            "LOW", "MEDIUM_V5_FALLBACK" -> LOW
-            "MEDIUM" -> MEDIUM
-            "HIGH", "LARGE", "SUPER_LARGE" -> HIGH
-            else -> HIGH
+            null, "", "old-value", "LOW", "MEDIUM", "MEDIUM_V5_FALLBACK",
+            "HIGH", "LARGE", "SUPER_LARGE" -> MEDIUM
+            else -> MEDIUM
         }
     }
 }
