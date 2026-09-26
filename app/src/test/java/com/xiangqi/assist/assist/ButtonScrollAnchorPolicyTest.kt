@@ -26,8 +26,33 @@ class ButtonScrollAnchorPolicyTest {
     }
 
     @Test
-    fun `scroll target preserves partial button offset and clamps before first item`() {
-        assertEquals(86, ButtonScrollAnchorPolicy.scrollX(childLeft = 100, offsetWithinButtonPx = -14))
-        assertEquals(0, ButtonScrollAnchorPolicy.scrollX(childLeft = 10, offsetWithinButtonPx = -20))
+    fun `stale row child index is rejected before delayed view access`() {
+        val anchor = ButtonScrollAnchorPolicy.Anchor(buttonIndex = 5, offsetWithinButtonPx = 0)
+        assertEquals(
+            1,
+            ButtonScrollAnchorPolicy.childIndexForAnchor(
+                anchor = anchor,
+                rowStart = 4,
+                rowEndExclusive = 7,
+                childCount = 3,
+            ),
+        )
+        assertNull(
+            ButtonScrollAnchorPolicy.childIndexForAnchor(
+                anchor = anchor,
+                rowStart = 4,
+                rowEndExclusive = 7,
+                childCount = 1,
+            ),
+        )
+        assertNull(
+            ButtonScrollAnchorPolicy.childIndexForAnchor(
+                anchor = anchor,
+                rowStart = 0,
+                rowEndExclusive = 4,
+                childCount = 3,
+            ),
+        )
     }
+
 }

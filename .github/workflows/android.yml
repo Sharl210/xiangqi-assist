@@ -4,7 +4,7 @@ name: Build-XiangqiAssist
 on:
   push:
     branches: [ main ]
-    tags: [ 'v1.3.2' ]
+    tags: [ 'v1.3.3' ]
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -30,7 +30,7 @@ jobs:
           cache: gradle
 
       - name: Prepare release signing key
-        if: github.ref == 'refs/tags/v1.3.2'
+        if: github.ref == 'refs/tags/v1.3.3'
         env:
           RELEASE_KEYSTORE_BASE64: ${{ secrets.ANDROID_RELEASE_KEYSTORE_BASE64 }}
         run: |
@@ -55,7 +55,7 @@ jobs:
           for apk in app/build/outputs/apk/*/release/*.apk; do
             echo "Checking $apk"
             "$ANDROID_HOME/build-tools/34.0.0/aapt2" dump badging "$apk" > badging.txt
-            grep -F "package: name='com.xiangqi.assist' versionCode='6' versionName='1.3.2'" badging.txt
+            grep -F "package: name='com.xiangqi.assist' versionCode='7' versionName='1.3.3'" badging.txt
             grep -F "application-label:'象棋辅助'" badging.txt
             "$ANDROID_HOME/build-tools/34.0.0/apksigner" verify --verbose "$apk" | grep 'Verified using v2 scheme (APK Signature Scheme v2): true'
           done
@@ -63,27 +63,27 @@ jobs:
       - name: Publish build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: xiangqi-assist-1.3.2-apks
+          name: xiangqi-assist-1.3.3-apks
           path: app/build/outputs/apk/*/release/*.apk
           if-no-files-found: error
 
-      # Only the additive v1.3.2 tag publishes formal release assets. Existing v1.3/v1.3.1
+      # Only the additive v1.3.3 tag publishes formal release assets. Existing v1.3/v1.3.1/v1.3.2
       # releases remain immutable; ordinary main pushes and pull requests are build-only.
-      - name: Prepare v1.3.2 release assets
-        if: github.ref == 'refs/tags/v1.3.2'
+      - name: Prepare v1.3.3 release assets
+        if: github.ref == 'refs/tags/v1.3.3'
         run: |
           mkdir -p dist
-          cp app/build/outputs/apk/armv8-/release/*.apk dist/xiangqi-assist-1.3.2-armv8.apk
-          cp app/build/outputs/apk/armv8-dotprod-/release/*.apk dist/xiangqi-assist-1.3.2-armv8-dotprod.apk
+          cp app/build/outputs/apk/armv8-/release/*.apk dist/xiangqi-assist-1.3.3-armv8.apk
+          cp app/build/outputs/apk/armv8-dotprod-/release/*.apk dist/xiangqi-assist-1.3.3-armv8-dotprod.apk
           sha256sum dist/*.apk | tee dist/SHA256SUMS.txt
 
-      - name: Create or update v1.3.2 Release
-        if: github.ref == 'refs/tags/v1.3.2'
+      - name: Create or update v1.3.3 Release
+        if: github.ref == 'refs/tags/v1.3.3'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if ! gh release view v1.3.2 >/dev/null 2>&1; then
-            gh release create v1.3.2 --title '象棋辅助 1.3.2' --notes-file docs/RELEASE_1.3.2.md
+          if ! gh release view v1.3.3 >/dev/null 2>&1; then
+            gh release create v1.3.3 --title '象棋辅助 1.3.3' --notes-file docs/RELEASE_1.3.3.md
           fi
-          gh release upload v1.3.2 dist/*.apk dist/SHA256SUMS.txt --clobber
-          gh release edit v1.3.2 --title '象棋辅助 1.3.2' --notes-file docs/RELEASE_1.3.2.md
+          gh release upload v1.3.3 dist/*.apk dist/SHA256SUMS.txt --clobber
+          gh release edit v1.3.3 --title '象棋辅助 1.3.3' --notes-file docs/RELEASE_1.3.3.md

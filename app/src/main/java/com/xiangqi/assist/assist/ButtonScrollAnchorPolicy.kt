@@ -28,4 +28,20 @@ object ButtonScrollAnchorPolicy {
 
     fun scrollX(childLeft: Int, offsetWithinButtonPx: Int): Int =
         (childLeft + offsetWithinButtonPx).coerceAtLeast(0)
+
+    /**
+     * 延迟恢复前的纯索引安全门。UI 层还会校验 parent 和重建代号，
+     * 这里负责把按钮范围/子项范围规则固定下来供回归测试。
+     */
+    fun childIndexForAnchor(
+        anchor: Anchor?,
+        rowStart: Int,
+        rowEndExclusive: Int,
+        childCount: Int,
+    ): Int? {
+        if (anchor == null || rowStart < 0 || rowEndExclusive <= rowStart || childCount <= 0) return null
+        if (anchor.buttonIndex !in rowStart until rowEndExclusive) return null
+        val childIndex = anchor.buttonIndex - rowStart
+        return childIndex.takeIf { it in 0 until childCount }
+    }
 }

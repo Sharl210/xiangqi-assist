@@ -199,7 +199,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="10dp"
-                android:text="识别模型：大型（历史复合）"
+                android:text="识别模型：High"
                 android:textAllCaps="false" />
 
             <TextView
@@ -207,7 +207,7 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="8dp"
-                android:text="超大型优先效果；大型当前为历史复合临时档，中型优先修复YOLO26-S，失败回退V5 Medium；超大型/原生大型待现成权重。禁止从零训练，只做成品转换。"
+                android:text="按效果选择 Lite / Low / Medium / High；当前会话不热切换，下次准备或开始时应用新选择。"
                 android:textColor="@color/brand_text_secondary"
                 android:textSize="12sp" />
 

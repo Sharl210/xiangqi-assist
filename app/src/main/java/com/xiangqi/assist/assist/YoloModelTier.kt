@@ -9,65 +9,57 @@ enum class YoloModelFormat {
 }
 
 /**
- * 移动端棋子识别模型档位。
- *
- * 顺序就是兼容性回退顺序：超大型 → 大型 → 中型 → Lite。
- * 超大型暂未取得现成中国象棋权重；大型先使用既有 Medium+universal/旋转鲁棒复合资源作为历史可用档，
- * 但它不冒充原生大型。中型优先使用原生 YOLO26-S；若后续效果验收不通过，可把中型切回已知稳定的原始 V5 Medium。
+ * 移动端识别档位按可用效果路线从低到高排列。
+ * Lite 固定为原始 V5 最终兜底；Low 为此前稳定的 V5 Medium；Medium 为 YOLO26-S 候选；
+ * High 暂用历史 Medium+universal 复合资源，名称只表示当前最高优先档，不宣称已证明效果胜过其他档，也不称原生大型。
  */
 enum class YoloModelTier(
     val displayName: String,
     val fileName: String,
     val format: YoloModelFormat,
     val selectionHint: String,
-    /** 只用于兼容性回退的内部档位，不在辅助页作为独立选择项展示。 */
-    val selectable: Boolean = true,
 ) {
-    SUPER_LARGE(
-        displayName = "超大型",
-        fileName = "yoloxq_super_native_fp32.tflite",
-        format = YoloModelFormat.YOLOV5_XQ,
-        selectionHint = "效果优先的最高原生档；当前尚未取得合格的中国象棋专用超大型权重",
-    ),
-    LARGE(
-        displayName = "大型",
-        fileName = "yolov5l_xq_fp32.tflite",
-        format = YoloModelFormat.YOLOV5_XQ,
-        selectionHint = "既有 Medium+旋转鲁棒复合大型资源；可继续使用和优化，但不是原生大型权重",
-    ),
-    MEDIUM(
-        displayName = "中型",
-        fileName = "yolo26s_xq_fp32.tflite",
-        format = YoloModelFormat.YOLO26_RAW,
-        selectionHint = "优先修复的原生 YOLO26-S 中国象棋15类候选；输入输出契约独立于旧 V5",
-    ),
-    /** YOLO26-S 效果验收不通过时的此前稳定 V5 Medium，作为同一中型档的内部回退。 */
-    MEDIUM_V5_FALLBACK(
-        displayName = "中型（V5回退）",
-        fileName = "yolov5m_xq_fp32.tflite",
-        format = YoloModelFormat.YOLOV5_XQ,
-        selectionHint = "此前稳定的原始 V5 Medium 回退档；不改变用户选择的中型档位",
-        selectable = false,
-    ),
-    /** 原始 V5 Lite 只作为最终兼容保底，不能被未验证的新模型覆盖。 */
     LITE(
-        displayName = "Lite（V5保底）",
+        displayName = "Lite",
         fileName = "yolov5n_xq_fp16.tflite",
         format = YoloModelFormat.YOLOV5_XQ,
-        selectionHint = "原始 V5 Lite 保底档；文件更小，通常更快、更省内存",
+        selectionHint = "原始 V5 Lite 最终兜底；模型最小，优先兼容与资源占用",
+    ),
+    LOW(
+        displayName = "Low",
+        fileName = "yolov5m_xq_fp32.tflite",
+        format = YoloModelFormat.YOLOV5_XQ,
+        selectionHint = "此前稳定的原始 V5 Medium；用作较低效果优先档和 YOLO26-S 运行时回退",
+    ),
+    MEDIUM(
+        displayName = "Medium",
+        fileName = "yolo26s_xq_fp32.tflite",
+        format = YoloModelFormat.YOLO26_RAW,
+        selectionHint = "原生 YOLO26-S 中国象棋15类候选；逐格效果仍在验证",
+    ),
+    HIGH(
+        displayName = "High",
+        fileName = "yolov5l_xq_fp32.tflite",
+        format = YoloModelFormat.YOLOV5_XQ,
+        selectionHint = "当前最高优先档，使用历史 Medium+universal 复合资源；不是原生大型权重，实际效果需用固定样本验证",
     );
 
-    /** 从当前选择向资源要求更低的档位回退，不跨过中间档。 */
-    fun fallbackOrder(): List<YoloModelTier> = values().drop(ordinal)
+    /** 从所选档位向兼容性要求更低的档位回退；枚举本身按 Lite→High 排列。 */
+    fun fallbackOrder(): List<YoloModelTier> = values().take(ordinal + 1).asReversed()
 
     companion object {
         const val MAX_MODEL_BYTES = 200_000_000L
+        const val DEFAULT_NAME = "HIGH"
 
-        /** 新安装仍优先尝试效果最高档；无原生工件时由真实探测链回退。 */
-        const val DEFAULT_NAME = "SUPER_LARGE"
-
-        fun fromStored(value: String?): YoloModelTier =
-            values().firstOrNull { it.name == value } ?: SUPER_LARGE
+        /** v1.3.2 的旧枚举值继续读取；旧超大型/大型选择迁移至当前 High 档。 */
+        fun fromStored(value: String?): YoloModelTier = when (value) {
+            null, "", "old-value" -> HIGH
+            "LITE" -> LITE
+            "LOW", "MEDIUM_V5_FALLBACK" -> LOW
+            "MEDIUM" -> MEDIUM
+            "HIGH", "LARGE", "SUPER_LARGE" -> HIGH
+            else -> HIGH
+        }
     }
 }
 

@@ -493,52 +493,27 @@ class AssistActivity : AppCompatActivity() {
         refreshStatus()
     }
 
-    /** 选择识别模型。新安装默认尝试超大型，兼容性失败按超大型→大型→中型→Lite（V5保底）回退。 */
+    /** 选择识别模型。只保存用户偏好；下一次准备/开始时才按该配置探测并加载。 */
     private fun showYoloModelChooser() {
         val cfg = AssistConfig(this)
-        val tiers = YoloModelTier.values().filter { it.selectable }
+        val tiers = YoloModelTier.values().toList()
         val labels = tiers.map { tier ->
             "${tier.displayName}：${tier.selectionHint}"
         }.toTypedArray()
         val current = tiers.indexOf(cfg.yoloModelTier).coerceAtLeast(0)
         AlertDialog.Builder(this)
-            .setTitle("选择识别模型")
+            .setTitle("选择识别模型效果档位")
             .setSingleChoiceItems(labels, current) { dialog, which ->
                 val requested = tiers[which]
                 dialog.dismiss()
-                btnYoloModel.isEnabled = false
-                tvYoloHint.text = "正在检查${requested.displayName}模型兼容性；失败时按${requested.fallbackOrder().joinToString("→") { it.displayName }}回退，不按当前负载回退。"
-                val complete: (com.xiangqi.assist.assist.YoloModelSelectionResult) -> Unit = { result ->
-                    runOnUiThread {
-                        btnYoloModel.isEnabled = true
-                        val explain = !result.success || result.wasFallback
-                        // refreshStatus 也会展示服务返回的状态；先记账，避免同一结果弹两次。
-                        if (explain) shownYoloModelMessage = result.userMessage()
-                        refreshStatus()
-                        if (explain) {
-                            AlertDialog.Builder(this)
-                                .setTitle(if (result.success) "模型已自动回退" else "模型不可用")
-                                .setMessage(result.userMessage())
-                                .setPositiveButton("知道了", null)
-                                .show()
-                        }
-                    }
-                }
-                val svc = service
-                if (svc != null && svc.isPrepared()) {
-                    // 已准备的服务可以后台替换 Interpreter；刷新只作用于已存在的球/面板，
-                    // 不因为模型切换重新创建悬浮窗或启动识别。
-                    svc.requestYoloModelTier(requested, complete)
-                } else {
-                    // 尚未点击“准备”时只保存用户选择，不创建服务、不拉起悬浮窗，
-                    // 兼容性检查留到下一次一键准备的同一检查链执行。
-                    cfg.yoloModelTier = requested
-                    btnYoloModel.isEnabled = true
-                    shownYoloModelMessage = "已保存${requested.displayName}模型选择；下次一键准备时检查设备兼容性。"
-                    tvYoloHint.text = shownYoloModelMessage
-                    refreshStatus()
-                    Toast.makeText(this, "已保存${requested.displayName}模型选择，下次准备时检查兼容性", Toast.LENGTH_SHORT).show()
-                }
+                cfg.yoloModelTier = requested
+                shownYoloModelMessage = "已保存${requested.displayName}模型选择；下次准备或开始时检查兼容性并应用。"
+                refreshStatus()
+                Toast.makeText(
+                    this,
+                    "已保存${requested.displayName}模型选择，下次准备或开始时应用",
+                    Toast.LENGTH_SHORT,
+                ).show()
             }
             .setNegativeButton("取消", null)
             .show()
@@ -689,11 +664,17 @@ class AssistActivity : AppCompatActivity() {
         }
 
         val modelConfig = AssistConfig(this)
-        val actualModel = svc?.yoloModelTier() ?: modelConfig.yoloModelTier
-        btnYoloModel.text = "识别模型：${actualModel.displayName}"
+        val selectedModel = modelConfig.yoloModelTier
+        val activeModel = svc?.yoloModelTier()
+        btnYoloModel.text = "识别模型：${selectedModel.displayName}"
+        val runtimePending = prepared && activeModel != null && activeModel != selectedModel
         val modelMessage = svc?.yoloModelSelectionMessage()?.takeIf { it.isNotBlank() }
-        tvYoloHint.text = modelMessage ?: yoloHint(actualModel)
-        if (modelMessage != null && modelMessage != shownYoloModelMessage && preparedIntent) {
+        tvYoloHint.text = when {
+            runtimePending -> "已保存${selectedModel.displayName}选择；当前会话仍用${activeModel!!.displayName}，下次准备或开始时应用新档位。"
+            modelMessage != null -> modelMessage
+            else -> yoloHint(selectedModel)
+        }
+        if (!runtimePending && modelMessage != null && modelMessage != shownYoloModelMessage && preparedIntent) {
             shownYoloModelMessage = modelMessage
             AlertDialog.Builder(this)
                 .setTitle("识别模型状态")

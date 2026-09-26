@@ -19,10 +19,9 @@ import kotlin.math.roundToInt
 /**
  * YOLOv5 棋子检测器（Android 侧，TFLite）。
  *
- * 模型：按用户记忆的档位尝试超大型→大型→中型→Lite；每个候选都必须通过资产读取、Interpreter 创建、张量分配、
- * 输入 NHWC float32 `[1,640,640,3]`、对应输出契约和一次受控推理。超大型当前没有现成工件；大型恢复既有
- * Medium+universal/旋转鲁棒复合资源作为临时可用档，但不冒充原生大型；中型优先使用原生 YOLO26-S，
- * Lite 保留原始 V5 作为最终保底。
+ * 模型：按效果优先顺序尝试 High→Medium→Low→Lite；每个候选都必须通过资产读取、Interpreter 创建、张量分配、
+ * 输入 NHWC float32 `[1,640,640,3]`、对应输出契约和一次受控推理。High 是历史复合资源，不冒充原生大型；
+ * Medium 使用独立 YOLO26-S raw 解码器，Low 使用此前稳定 V5 Medium，Lite 保留原始 V5 作为最终保底。
  * YOLO26-S 使用独立的 `[1,19,8400]` raw 输出解码器，不能套用旧 V5 的 `[1,25200,20]` 解码器。
  * 输入为 RGB（不是 BGR，BGR 会把红黑阵营互换）。
  * 纯推理封装：解码与棋盘映射在纯 JVM 的 YoloPostprocessor / DetectionBoardMapper 中，
@@ -35,7 +34,7 @@ import kotlin.math.roundToInt
  */
 class YoloBoardDetector(
     context: Context,
-    requestedTier: YoloModelTier = YoloModelTier.SUPER_LARGE,
+    requestedTier: YoloModelTier = YoloModelTier.HIGH,
 ) {
 
     private data class RuntimeModel(

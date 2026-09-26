@@ -558,18 +558,28 @@ class ScreenAssistService : Service() {
     /** 最近一次模型选择/自动回退的用户可读说明；正常无回退时为空。 */
     fun yoloModelSelectionMessage(): String? = yoloSelectionMessage
 
-    /** 准备或重新开始前共用的兼容性门；当前 detector 存在即说明已通过同一探测链。 */
+    /**
+     * 准备或重新开始前共用的兼容性门。
+     * 若设置页在上一会话中只改了配置，则在这里按新配置创建并探测模型；
+     * 选择动作本身不会触发这条路径。新模型失败时保留当前可用 detector，避免留下半切换状态。
+     */
     fun ensureYoloModelReady(callback: (YoloModelSelectionResult) -> Unit) {
         mainHandler.post {
-            yoloDetector?.let { detector ->
-                callback(detector.selectionResult)
+            val requested = config.yoloModelTier
+            val existing = yoloDetector
+            if (existing != null && existing.modelTier == requested) {
+                callback(existing.selectionResult)
                 return@post
             }
-            val requested = config.yoloModelTier
+            // 先从识别入口摘除旧 detector，阻止新的识别任务进入；旧对象暂不关闭，
+            // 只有新 detector 成功创建后才释放，这样失败时仍可恢复到已知可用档位。
+            yoloDetector = null
+            recognitionEpoch++
             workerHandler.post {
-                var detector: YoloBoardDetector? = null
-                val result = try {
-                    YoloBoardDetector(this@ScreenAssistService, requested).also { detector = it }.selectionResult
+                var replacement: YoloBoardDetector? = null
+                val probe = try {
+                    replacement = YoloBoardDetector(this@ScreenAssistService, requested)
+                    replacement!!.selectionResult
                 } catch (t: Throwable) {
                     (t as? YoloModelUnavailableException)?.selection
                         ?: YoloModelSelectionResult(
@@ -579,105 +589,40 @@ class ScreenAssistService : Service() {
                             fatalReason = t.message ?: t::class.java.simpleName,
                         )
                 }
-                mainHandler.post {
+                // 成功后再关旧 detector；失败则让主线程恢复旧 detector。
+                if (replacement != null) {
+                    runCatching { existing?.close() }
+                }
+                mainHandler.post mainModelResult@{
                     if (stopping || overlayClosed) {
-                        runCatching { detector?.close() }
-                        callback(result)
-                        return@post
+                        runCatching { replacement?.close() }
+                        callback(probe)
+                        return@mainModelResult
                     }
-                    yoloDetector = detector
-                    if (detector != null) {
-                        config.yoloModelTier = detector!!.modelTier
+                    val active = replacement ?: existing
+                    yoloDetector = active
+                    val result = if (replacement == null && existing != null) {
+                        probe.copy(
+                            actual = existing.modelTier,
+                            modelFile = existing.modelFile,
+                        )
+                    } else {
+                        probe
+                    }
+                    if (active != null) {
+                        config.yoloModelTier = active.modelTier
                         yoloSelectionMessage = if (result.wasFallback) result.userMessage() else null
                     } else {
                         yoloSelectionMessage = result.userMessage()
                     }
-                    postRender()
+                    refreshExistingOverlayAfterModelChange()
                     callback(result)
                 }
             }
         }
     }
 
-    /**
-     * 用户切换识别模型。模型切换在后台完成：先停止接受新推理、等待在途任务退出,
-     * 再创建目标档位并按“超大型→大型→中型→V5中型回退→Lite”规则探测；成功后把实际档位写回设置。
-     */
-    fun requestYoloModelTier(
-        requested: YoloModelTier,
-        callback: (YoloModelSelectionResult) -> Unit,
-    ) {
-        mainHandler.post {
-            if (stopping || overlayClosed) return@post
-            val previous = yoloDetector
-            val previousTier = previous?.modelTier
-            yoloDetector = null
-            recognitionEpoch++
-            stableFrameWindow.reset()
-            sessionGrid = null
-            lastFullVisionCheckAt = 0L
-            yoloSelectionMessage = "正在检查${requested.displayName}模型兼容性…"
-            setStatus(yoloSelectionMessage!!, onlyIfExpandedPanelVisible = true)
-            refreshExistingOverlayAfterModelChange()
-            workerHandler.post {
-                runCatching { previous?.close() }
-                var replacement: YoloBoardDetector? = null
-                var result: YoloModelSelectionResult
-                try {
-                    replacement = YoloBoardDetector(this@ScreenAssistService, requested)
-                    result = replacement!!.selectionResult
-                } catch (t: Throwable) {
-                    val failure = (t as? YoloModelUnavailableException)?.selection
-                        ?: YoloModelSelectionResult(
-                            requested = requested,
-                            actual = null,
-                            modelFile = null,
-                            fatalReason = t.message ?: t::class.java.simpleName,
-                        )
-                    // 保留一个已经可用的旧档位作为可逆恢复路径；不能留下半切换状态。
-                    if (previousTier != null) {
-                        replacement = runCatching {
-                            YoloBoardDetector(this@ScreenAssistService, previousTier)
-                        }.getOrNull()
-                    }
-                    result = if (replacement != null) {
-                        failure.copy(
-                            actual = replacement!!.modelTier,
-                            modelFile = replacement!!.modelFile,
-                        )
-                    } else {
-                        failure
-                    }
-                }
-                val ready = replacement
-                mainHandler.post {
-                    if (stopping || overlayClosed) {
-                        runCatching { ready?.close() }
-                        callback(result)
-                        return@post
-                    }
-                    yoloDetector = ready
-                    if (ready != null) {
-                        config.yoloModelTier = ready.modelTier
-                        yoloSelectionMessage = if (result.wasFallback) result.userMessage() else null
-                        setStatus(
-                            if (result.wasFallback) result.userMessage()
-                            else "已启用${ready.modelTier.displayName}模型",
-                            onlyIfExpandedPanelVisible = true,
-                        )
-                        refreshExistingOverlayAfterModelChange()
-                    } else {
-                        yoloSelectionMessage = result.userMessage()
-                        setStatus(result.userMessage(), onlyIfExpandedPanelVisible = true)
-                        refreshExistingOverlayAfterModelChange()
-                    }
-                    callback(result)
-                }
-            }
-        }
-    }
-
-    /** 模型切换只刷新已经存在的悬浮形态；没有打开悬浮窗时不创建新的面板、不启动识别会话。 */
+    /** 模型在准备/开始检查后只刷新已有悬浮形态；不会因偏好修改创建面板。 */
     private fun refreshExistingOverlayAfterModelChange() {
         if (overlayPanel != null || overlayBall != null) {
             requestRenderOnly(createOverlayIfMissing = false)
@@ -4062,19 +4007,6 @@ class ScreenAssistService : Service() {
      * - 运行中显示“暂停”，只停运行管线，不清棋谱和日志。
      */
     private fun toggleRun() {
-        if (yoloDetector == null) {
-            setStatus("正在按当前设置检查识别模型兼容性…")
-            ensureYoloModelReady { result ->
-                if (result.success) {
-                    toggleRun()
-                } else {
-                    paused = true
-                    setStatus(result.userMessage())
-                    postRender()
-                }
-            }
-            return
-        }
         val snapshot = foregroundPauseSnapshot
         val resumeSnapshot = snapshot?.takeIf { it.suspendedByForeground && it.wasRunning }
         if (resumeSnapshot != null) {
@@ -4085,23 +4017,40 @@ class ScreenAssistService : Service() {
             postRender()
             return
         }
+        // 运行中点按钮总是先暂停当前会话。若用户刚改了模型偏好，
+        // 只在下一次明确开始/继续时才加载新档位，绝不把“暂停”变成热切换。
         if (!paused) {
-        val resumeSnapshot = ForegroundPausePolicy.capture(
-            paused = false,
-            resumePackage = foregroundBaselinePackage,
-            suspendedByForeground = false,
-        )
-        trace("RUN_PAUSE", "landing=${landingState?.stage} searching=$searching fen=$currentFen")
-        pauseRuntime(clearAnalysis = true)
-        foregroundPauseSnapshot = resumeSnapshot
-        setStatus(
-            if (resumeSnapshot != null)
-                "已暂停（屏幕画面未输出，授权保留；无障碍继续监听前台）\n回到原棋盘应用后点『继续』恢复"
-            else
-                "已暂停（屏幕画面未输出，授权保留；无障碍继续监听前台）\n回到应用后点『继续』恢复"
-        )
-        postRender()
-        return
+            val resumeSnapshot = ForegroundPausePolicy.capture(
+                paused = false,
+                resumePackage = foregroundBaselinePackage,
+                suspendedByForeground = false,
+            )
+            trace("RUN_PAUSE", "landing=${landingState?.stage} searching=$searching fen=$currentFen")
+            pauseRuntime(clearAnalysis = true)
+            foregroundPauseSnapshot = resumeSnapshot
+            setStatus(
+                if (resumeSnapshot != null)
+                    "已暂停（屏幕画面未输出，授权保留；无障碍继续监听前台）\n回到原棋盘应用后点『继续』恢复"
+                else
+                    "已暂停（屏幕画面未输出，授权保留；无障碍继续监听前台）\n回到应用后点『继续』恢复"
+            )
+            postRender()
+            return
+        }
+
+        val requestedTier = config.yoloModelTier
+        if (yoloDetector?.modelTier != requestedTier) {
+            setStatus("正在按已保存的${requestedTier.displayName}设置检查模型兼容性…")
+            ensureYoloModelReady { result ->
+                if (result.success) {
+                    toggleRun()
+                } else {
+                    paused = true
+                    setStatus(result.userMessage())
+                    postRender()
+                }
+            }
+            return
         }
 
         if (!isCapturing() && !isCaptureThrottled()) {

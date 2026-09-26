@@ -82,8 +82,15 @@ class OverlayButtonBar @JvmOverloads constructor(
     /** 所有按钮（供边缘命中判定排除按钮区） */
     fun allButtons(): List<View> = items
 
-    /** 按钮栏中实际按钮不再强制统一宽度；每个 TextView 按文字和左右内边距自测量。 */
+    /** 延迟恢复任务必须属于当前这次重建；旧任务不能再操作已拆掉的行/按钮。 */
+    private var rebuildGeneration = 0L
+
+    /**
+     * 重建按钮行。所有延迟滚动任务都带着本次重建代号和按钮范围，
+     * 避免 Android 16/部分 ROM 在连续重排时取到已经被移除的 child。
+     */
     private fun rebuild() {
+        val generation = ++rebuildGeneration
         val host = host ?: return
         val rowH = if (rowHeightPx > 0) rowHeightPx else LayoutParams.WRAP_CONTENT
         // `btnW` 仅保留作为旧布局参数的兼容占位；实际子项全部使用 WRAP_CONTENT。
@@ -103,9 +110,10 @@ class OverlayButtonBar @JvmOverloads constructor(
                 setOnScrollChangeListener { _, scrollX, _, _, _ ->
                     if (row.childCount == 0) return@setOnScrollChangeListener
                     val childIndex = (0 until row.childCount).firstOrNull { child ->
-                        row.getChildAt(child).right > scrollX
+                        (row.getChildAt(child) ?: return@firstOrNull false).right > scrollX
                     } ?: (row.childCount - 1)
-                    val child = row.getChildAt(childIndex)
+                    val child = row.getChildAt(childIndex) ?: return@setOnScrollChangeListener
+                    if (child.parent !== row) return@setOnScrollChangeListener
                     scrollAnchorListener?.invoke(
                         ButtonScrollAnchorPolicy.Anchor(
                             buttonIndex = rowStart + childIndex,
@@ -128,9 +136,22 @@ class OverlayButtonBar @JvmOverloads constructor(
             val anchor = scrollAnchorProvider?.invoke()
                 ?.takeIf { it.buttonIndex in rowStart until rowEnd }
             if (anchor != null) {
-                val childIndex = anchor.buttonIndex - rowStart
-                scroll.post {
-                    val target = row.getChildAt(childIndex)
+                val childIndex = ButtonScrollAnchorPolicy.childIndexForAnchor(
+                    anchor = anchor,
+                    rowStart = rowStart,
+                    rowEndExclusive = rowEnd,
+                    childCount = row.childCount,
+                )
+                if (childIndex != null) scroll.post {
+                    // rebuild() 可能在这个 Runnable 排队后再次执行：旧 row 已从 host
+                    // 移除，或按钮数量已经变化。此时必须安静退出，不能访问空 child。
+                    if (generation != rebuildGeneration ||
+                        scroll.parent !== host ||
+                        row.parent !== scroll ||
+                        childIndex !in 0 until row.childCount
+                    ) return@post
+                    val target = row.getChildAt(childIndex) ?: return@post
+                    if (target.parent !== row) return@post
                     scroll.scrollTo(
                         ButtonScrollAnchorPolicy.scrollX(target.left, anchor.offsetWithinButtonPx),
                         0,

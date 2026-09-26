@@ -258,13 +258,19 @@ class AssistConfig(context: Context) {
         set(value) { sp.edit().putInt(KEY_HASH_MB, value).commit() }
 
     /**
-     * YOLO 识别模型档位。新安装默认尝试超大型；如果没有合格工件或设备不兼容，按超大型→大型（历史复合）→中型→Lite（V5保底）回退；用户选择和实际兼容性回退后的档位都会记住。
-     * 中型优先使用 YOLO26-S；效果验收不通过时由计划恢复旧 V5 Medium。回退只由模型能否加载/分配/执行决定，不读取瞬时负载、温度或功耗。
+     * 用户选择的识别效果档位。选项按 Lite→Low→Medium→High 排列；新安装默认 High。
+     * 更换选择只保存偏好；已运行的模型会话不被即时重建，下一次准备/开始时按新选择探测并应用。
      */
     var yoloModelTier: YoloModelTier
-        get() = YoloModelTier.fromStored(
-            sp.getString(KEY_YOLO_MODEL_TIER, YoloModelTier.DEFAULT_NAME)
-        )
+        get() {
+            val stored = sp.getString(KEY_YOLO_MODEL_TIER, null)
+            val tier = YoloModelTier.fromStored(stored)
+            // 一次性迁移 v1.3.2 旧名称：SUPER_LARGE/LARGE→HIGH，V5 Medium回退→LOW。
+            if (stored != null && stored != tier.name) {
+                sp.edit().putString(KEY_YOLO_MODEL_TIER, tier.name).apply()
+            }
+            return tier
+        }
         set(value) {
             sp.edit().putString(KEY_YOLO_MODEL_TIER, value.name).apply()
         }
