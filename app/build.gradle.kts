@@ -22,8 +22,8 @@ android {
         applicationId = "com.xiangqi.assist"
         minSdk = 26
         targetSdk = 33
-        versionCode = 7
-        versionName = "1.3.3"
+        versionCode = 8
+        versionName = "1.3.4"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "x86_64")

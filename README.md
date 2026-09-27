@@ -4,13 +4,13 @@
 
 > 本项目仅用于个人学习、技术研究与文化交流。使用屏幕识别、悬浮窗或自动落子功能时，请遵守所在平台规则以及当地法律法规。
 
-## 1.3.3 增量修复与发行
+## 1.3.4 双模型样本优化开发
 
-- 当前开发版本：象棋辅助 1.3.3（versionCode 7），目标是修复 Android 16 悬浮面板崩溃并统一模型选择行为；正式附件以 `v1.3.3` GitHub Release 为准。
-- 已公开的 1.3.2（versionCode 6）、1.3.1 及更早版本保持不变；历史发行说明仍可分别查看对应文档。
-- 当前 APK 的模型用户选项收敛为 `Medium / Lite`：Medium 是原始 V5 中国象棋中型模型并作为默认主模型；Lite 是原始 V5 Lite，只有 Medium 运行时兼容检查失败时才作为最终回退。旧版 YOLO26-S 与 Medium+Universal 复合 High 已从当前模型选项和资源中移除。
+- 当前开发候选：象棋辅助 1.3.4（versionCode 8），用于继续验证 Medium/Lite 样本优化；尚未正式发布，不能称作发行版。
+- 最新公开 Release 仍为象棋辅助 1.3.3（versionCode 7）；1.3.2、1.3.1及更早版本与 Release 资产保持不变。
+- 当前 APK 的模型用户选项为 `Medium / Lite`：Medium 是原始 V5 中国象棋中型模型并作为默认主模型；Lite 是原始 V5 Lite，只有 Medium 运行时兼容检查失败时才作为最终回退。旧版 YOLO26-S 与 Medium+Universal 复合 High 已从当前模型选项和资源中移除。
 - 模型选择只保存配置，不自动创建或展开悬浮窗，也不热切换当前会话；下一次一键准备或点击开始/继续时才读取并执行兼容性探测。
-- 1.3.2 发布说明见 [1.3.2发布说明](docs/RELEASE_1.3.2.md)，本轮发布说明见 [1.3.3发布说明](docs/RELEASE_1.3.3.md)。
+- 历史1.3.3发布说明见 [1.3.3发布说明](docs/RELEASE_1.3.3.md)；1.3.4只有在目标验收完成并另行创建增量Release后才会有正式发布说明。
 
 ## 主要特色
 
@@ -32,11 +32,11 @@
 
 | 正式 Release 附件 | 适用设备 |
 | --- | --- |
-| `xiangqi-assist-1.3.3-armv8.apk` | 通用 64 位 ARM Android 设备，兼容性优先 |
-| `xiangqi-assist-1.3.3-armv8-dotprod.apk` | 支持 ARMv8.2 dotprod 指令的设备 |
+| `xiangqi-assist-1.3.3-armv8.apk` | 通用 64 位 ARM Android 设备，兼容性优先（历史正式版） |
+| `xiangqi-assist-1.3.3-armv8-dotprod.apk` | 支持 ARMv8.2 dotprod 指令的设备（历史正式版） |
 | `SHA256SUMS.txt` | 同次 Release 生成的 APK 校验值 |
 
-- 正式发布：象棋辅助 1.3.2（versionCode 6）仍作为上一版公开发行保留；本轮 1.3.3（versionCode 7）为 Android 16 悬浮面板崩溃、模型选择静默保存和效果档位命名的增量修复，正式附件以 `v1.3.3` GitHub Release 为准。
+- 正式发布：象棋辅助 1.3.3（versionCode 7）仍是最新公开发行；当前1.3.4（versionCode 8）是识别优化开发候选，尚未正式发布，样本安全门和真机测试闭环前不创建新Release。
 
 ## 使用概览
 
@@ -69,7 +69,7 @@
 ./gradlew :app:testArmv8-DebugUnitTest
 ```
 
-未提供发布密钥时，本地源码构建使用 Android Debug 签名，仅供测试。正式签名由 `v1.3.3` GitHub Actions 工作流从仓库加密密钥注入；不要将本地调试签名 APK 当作正式附件。公开版 `v1.3.2`、`v1.3.1` 与更早版本保持原样。
+未提供发布密钥时，本地源码构建使用 Android Debug 签名，仅供测试。正式版1.3.3的发布密钥仅由旧版`v1.3.3`标签工作流用于正式Release；1.3.4设备测试包必须由手动`workflow_dispatch`明确选择签名后构建，构建产物仍是非Release测试包，不会自动上传公开Release。不要把未签同一发布密钥的CI包覆盖安装到正式版。公开版`v1.3.3`、`v1.3.2`及更早版本保持原样。
 
 ## 项目结构、鸣谢与许可
 
