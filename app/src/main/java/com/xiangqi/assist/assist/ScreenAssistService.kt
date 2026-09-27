@@ -513,6 +513,7 @@ class ScreenAssistService : Service() {
     fun effectiveSideRed(): Boolean = mySideIsRed()
 
     fun requestAutoPlay(on: Boolean) {
+        runtimeLogger.logUserAction("activity", if (on) "开启自动走子" else "关闭自动走子")
         mainHandler.post { setAutoPlayByUser(on) }
     }
 
@@ -1234,7 +1235,7 @@ class ScreenAssistService : Service() {
     @Volatile private var landingRebasePreBoard: Array<IntArray>? = null
     @Volatile private var landingRebaseExpectedBoard: Array<IntArray>? = null
     @Volatile private var landingRebaseRedGo = true
-    /** 这一轮日志是否已经启动；暂停/前台切换不创建新日志，重置/首次运行才创建。 */
+    /** 这一轮是否已经开始运行；日志从成功一键准备时启动，暂停、重置和继续均不换日志。 */
     @Volatile private var runSessionStarted = false
 
     /** 当前落子事务；为空就绝不允许显示“落子中/核对中”。 */
@@ -1370,10 +1371,8 @@ class ScreenAssistService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        runtimeLogger.startSession("service_create")
         runSessionStarted = false
-        trace("SERVICE_CREATE", "files=${runtimeLogger.directory().absolutePath}")
-        // 自动走子是持久用户开关；但前台观察和悬浮窗生命周期必须等用户点击“一键准备”。
+        // 准备前不创建或清理会话日志；旧会话日志留到下一次成功一键准备再替换。
         autoPlayOn = config.autoPlay
         detachForegroundObservation()
         tracker = BoardTracker(confirmCount = 1)
@@ -1406,6 +1405,7 @@ class ScreenAssistService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_START) {
             if (preparedSession && mediaProjection != null && retainedPausedVirtualDisplay != null) {
+                runtimeLogger.logUserAction("activity", "一键准备续接已准备会话")
                 // 权限关闭过渡期旧服务仍存活；重新准备时复用已授权会话，不误吞新调用。
                 if (!paused) return START_STICKY
                 mainHandler.post { toggleRun() }
@@ -1499,10 +1499,6 @@ class ScreenAssistService : Service() {
     private fun startCapture(resultCode: Int, data: Intent?, resumeCapture: Boolean = false) {
         if (mediaProjection != null || data == null) return
         val resumingPreparedSession = resumeCapture && preparedSession
-        if (!runSessionStarted) {
-            runtimeLogger.startSession("capture_start")
-        }
-        trace("CAPTURE_START", "resultCode=$resultCode")
         lastFullVisionCheckAt = 0L
         abortCaptureWindow()
         // 新的一轮录制：管线证据时间戳全部归零，监督器按新管线的第一帧重新计时。
@@ -1628,6 +1624,16 @@ class ScreenAssistService : Service() {
             return
         }
         refreshForegroundServiceTypeForCaptureState()
+        val freshPreparedSession = !runtimeLogger.isActive()
+        if (freshPreparedSession) {
+            runtimeLogger.startSession(if (resumingPreparedSession) "prepared_session_resume" else "one_tap_prepare")
+            runtimeLogger.logUserAction("activity", "一键准备")
+        }
+        trace(
+            if (freshPreparedSession) "CAPTURE_PREPARED" else "CAPTURE_RESUMED",
+            "resume=$resumingPreparedSession size=${captureW}x${captureH} paused=true"
+        )
+        trace("CAPTURE_START", "resultCode=$resultCode resume=$resumingPreparedSession")
 
         // 模式恢复：workMode 是唯一真源，三态互斥由 setModeInternal 保证。
         // 自动落子是独立开关（默认开）；通道没连接时由 autoBlockReason 明确说明原因，
@@ -2103,7 +2109,7 @@ class ScreenAssistService : Service() {
     }
 
     /**
-     * 启动或继续运行。继续不创建日志起点；首次运行与“重置”由各自入口显式创建。
+     * 启动或继续运行；运行按钮的点击事件写入现有准备会话日志，不在这里建立新日志。
      * [rebaseBoard] 为 true 时丢弃暂停前的视觉基线，以免外部应用期间已走多手。
      */
     private fun resumeRuntime(rebaseBoard: Boolean, userInitiated: Boolean): Boolean {
@@ -3505,6 +3511,9 @@ class ScreenAssistService : Service() {
             this.y = y
         }
         panel.onAction = ::onOverlayAction
+        panel.onCloseArmed = {
+            runtimeLogger.logUserAction("overlay", "关闭按钮（等待二次确认）")
+        }
         panel.onCellTap = ::onManualCellTap
         panel.setButtonRowScrollState(
             provider = { config.overlayButtonScrollAnchor },
@@ -3993,6 +4002,7 @@ class ScreenAssistService : Service() {
 
     private fun closeSessionInternal(message: String) {
         if (stopping) return
+        trace("SESSION_CLOSE", "reason=$message")
         runCatching { persistOverlayPosNow() }
         stopping = true
         overlayClosed = true
@@ -4027,9 +4037,31 @@ class ScreenAssistService : Service() {
         runCatching { detector?.close() }
         cancelForegroundNotification()
         setStatus(message)
+        runtimeLogger.endSession("one_tap_close")
+    }
+
+    private fun overlayActionLabel(action: OverlayAction): String = when (action) {
+        OverlayAction.TOGGLE_RUN -> "开始继续或暂停"
+        OverlayAction.CYCLE_MODE -> "切换工作模式"
+        OverlayAction.TOGGLE_AUTO -> "切换自动走子"
+        OverlayAction.TOGGLE_SIM -> "切换仿真模式"
+        OverlayAction.CYCLE_CANDIDATE_COUNT -> "切换候选数量"
+        OverlayAction.CYCLE_CANDIDATE -> "切换或预存变招"
+        OverlayAction.UNDO -> "悔棋"
+        OverlayAction.REFRESH_BOARD -> "更新棋谱"
+        OverlayAction.STOP_RESET -> "重置棋盘"
+        OverlayAction.TOGGLE_MY_SIDE -> "切换己方颜色"
+        OverlayAction.FLIP_TURN -> "切换当前走棋方"
+        OverlayAction.TOGGLE_THINKING_MODE -> "切换思考模式"
+        OverlayAction.CYCLE_STRENGTH -> "切换引擎强度"
+        OverlayAction.CYCLE_HASH -> "切换引擎Hash"
+        OverlayAction.EDIT_BOARD_REGION -> "框选棋盘区域"
+        OverlayAction.COLLAPSE -> "缩小为悬浮球"
+        OverlayAction.CLOSE -> "一键关闭"
     }
 
     private fun onOverlayAction(action: OverlayAction) {
+        runtimeLogger.logUserAction("overlay", overlayActionLabel(action))
         when (action) {
             OverlayAction.CYCLE_MODE -> cycleMode()
             OverlayAction.TOGGLE_AUTO -> toggleAutoPlaySwitch()
@@ -4058,9 +4090,9 @@ class ScreenAssistService : Service() {
 
     /**
      * 开始 / 继续 / 暂停共用一个按钮：
-     * - 首次运行显示“开始”，建立本轮唯一日志起点；
-     * - 暂停后显示“继续”，沿用当前日志并从屏幕重新建立视觉基线；
-     * - 运行中显示“暂停”，只停运行管线，不清棋谱和日志。
+     * - 首次运行沿用一键准备时建立的会话日志；
+     * - 暂停后继续沿用同一日志并从屏幕重新建立视觉基线；
+     * - 运行中点按钮总是先暂停当前会话，不清棋谱和日志。
      */
     private fun toggleRun() {
         val snapshot = foregroundPauseSnapshot
@@ -4128,9 +4160,6 @@ class ScreenAssistService : Service() {
         if (firstStart) {
             // 点击开始的这一轮优先主动取一次前台包名，确保基准对应用户点击开始时所在的应用。
             AssistAccessibilityService.instance?.reportCurrentForegroundWindow()
-        }
-        if (firstStart) {
-            runtimeLogger.startSession("run_start")
             runSessionStarted = true
         }
         trace(if (firstStart) "RUN_START" else "RUN_CONTINUE", "mode=$activeWorkMode auto=$autoPlayOn")
@@ -4157,11 +4186,10 @@ class ScreenAssistService : Service() {
     }
 
     /**
-     * 重置：打断当前事务与搜索、清空棋面/历史，并建立一个新的日志起点。
+     * 重置：打断当前事务与搜索、清空棋面/历史，但保留本次一键准备会话的完整日志。
      * 录屏环境仍有效时直接回到识盘；环境缺失时保持暂停并引导到悬浮窗辅助页准备。
      */
     private fun stopAndReset() {
-        runtimeLogger.startSession("user_reset")
         runSessionStarted = true
         trace("RUN_RESET", "mode=$activeWorkMode auto=$autoPlayOn")
         foregroundPauseSnapshot = null
@@ -4175,10 +4203,10 @@ class ScreenAssistService : Service() {
         clearNextVariationRequest()
         if (isProjectionAuthorized()) {
             resumeRuntime(rebaseBoard = false, userInitiated = true)
-            setStatus("已重置并建立新的日志起点\n正在重新识盘")
+            setStatus("已重置棋盘，正在重新识别")
         } else {
             paused = true
-            setStatus("已重置并建立新的日志起点\n请到悬浮窗辅助页点击『一键准备』")
+            setStatus("已重置棋盘\n请到悬浮窗辅助页点击『一键准备』")
         }
         postRender()
     }
@@ -4727,6 +4755,7 @@ class ScreenAssistService : Service() {
     /** 手动模式：小棋盘点格（canonical x,y）——选子 / 走子 / 删子 */
     private fun onManualCellTap(x: Int, y: Int) {
         if (!manualMode) return
+        runtimeLogger.logUserAction("mini_board", "手动点格", "x=$x y=$y")
         val board = currentCanonical ?: return
         val sel = manualSelected
         if (sel == null) {
@@ -6356,6 +6385,7 @@ class ScreenAssistService : Service() {
     override fun onDestroy() {
         // 先设置停止闸门并使所有旧帧失效；已经进入TFLite的任务由 detector.close()
         // 的同一把锁自然排空，禁止在Interpreter.run期间并发close。
+        runtimeLogger.endSession("service_destroy")
         stopping = true
         overlayClosed = true
         AssistAccessibilityService.setGlobalForegroundObserver(null)

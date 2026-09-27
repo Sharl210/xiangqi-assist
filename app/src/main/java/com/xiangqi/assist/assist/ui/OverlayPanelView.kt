@@ -138,6 +138,8 @@ class OverlayPanelView @JvmOverloads constructor(
     private val btnClose: TextView
 
     var onAction: ((OverlayAction) -> Unit)? = null
+    /** 第一次点关闭只进入二次确认，也记录这次主动点击。 */
+    var onCloseArmed: (() -> Unit)? = null
     /** 手动模式：小棋盘点格（canonical x,y），由服务端处理选子/走子/删子 */
     var onCellTap: ((x: Int, y: Int) -> Unit)? = null
     /** 拖动/缩放开始或结束 */
@@ -243,6 +245,7 @@ class OverlayPanelView @JvmOverloads constructor(
         findViewById<TextView>(R.id.overlay_btn_collapse).setOnClickListener { onAction?.invoke(OverlayAction.COLLAPSE) }
         btnClose.setOnClickListener {
             if (!closeArmed) {
+                onCloseArmed?.invoke()
                 closeArmed = true
                 btnClose.text = "确认?"
                 btnClose.setTextColor(0xFFFF5252.toInt())
