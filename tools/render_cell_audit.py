@@ -158,6 +158,7 @@ def main():
               "核对方法：逐格比对实际棋子与标注；任何不一致格即为识别错误，请在下方表格记录。", ""]
 
     summary = {"samples": [], "per_model": {}}
+    per_model_cells = {"Medium": {}, "Lite": {}}
     for model in ("Medium", "Lite"):
         per_model = data["results"].get(model, {})
         ok = 0
@@ -194,7 +195,22 @@ def main():
                 "safe_geometry": bool(cand.get("safe_geometry")), "pieces": count,
                 "cells": cells, "overlay": out_png,
             })
+            per_model_cells[model][name] = cells
         summary["per_model"][model] = {"safe_geometry_count": ok, "total": len(per_model)}
+
+    report += ["## 两模型候选一致性（人工核对可据此减半）", "",
+               "同一张图上两模型候选完全一致时，人工只需核对一次即可同时覆盖两个模型；"
+               "不一致处即两模型分歧格，必须逐格看原图确认。", ""]
+    names = [s["sample"] for s in summary["samples"] if s["model"] == "Medium"]
+    agree = 0
+    for name in names:
+        diff = cell_diff(per_model_cells["Medium"].get(name, {}), per_model_cells["Lite"].get(name, {}))
+        if diff:
+            report.append(f"- {name}：{len(diff)} 处分歧 → {'；'.join(diff)}")
+        else:
+            agree += 1
+            report.append(f"- {name}：一致")
+    report += ["", f"一致 {agree}/{len(names)} 张；分歧张数 {len(names) - agree}。", ""]
 
     report += ["## 汇总", "",
                f"- Medium 几何安全候选：{summary['per_model'].get('Medium', {})}",

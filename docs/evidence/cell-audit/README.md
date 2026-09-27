@@ -386,6 +386,23 @@
 9  . . . . K . . . .
 ```
 
+## 两模型候选一致性（人工核对可据此减半）
+
+同一张图上两模型候选完全一致时，人工只需核对一次即可同时覆盖两个模型；不一致处即两模型分歧格，必须逐格看原图确认。
+
+- Screenshot_2026-09-26-20-13-29-85_cn.jj.chess.nearme.gamecenter.png：一致
+- Screenshot_2026-09-26-20-13-33-00_cn.jj.chess.nearme.gamecenter.png：一致
+- Screenshot_2026-09-26-20-15-44-32_cn.jj.chess.nearme.gamecenter.png：1 处分歧 → 2,8: B vs -
+- Screenshot_2026-09-26-20-16-11-74_cn.jj.chess.nearme.gamecenter.png：1 处分歧 → 2,8: B vs C
+- Screenshot_2026-09-26-20-16-48-74_cn.jj.chess.nearme.gamecenter.png：一致
+- Screenshot_2026-09-26-20-18-28-25_cn.jj.chess.nearme.gamecenter.png：1 处分歧 → 2,8: B vs C
+- 一直说局面异常即使点击更新棋谱也没用.png：1 处分歧 → 2,8: R vs -
+- 帅字都识别到错行了.png：一致
+- 识别出错.png：一致
+- 错误的识别结果。.png：一致
+
+一致 6/10 张；分歧张数 4。
+
 ## 汇总
 
 - Medium 几何安全候选：{'safe_geometry_count': 10, 'total': 10}
