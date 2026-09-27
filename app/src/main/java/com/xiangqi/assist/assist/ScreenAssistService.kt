@@ -4098,6 +4098,15 @@ class ScreenAssistService : Service() {
         val snapshot = foregroundPauseSnapshot
         val resumeSnapshot = snapshot?.takeIf { it.suspendedByForeground && it.wasRunning }
         if (resumeSnapshot != null) {
+            val observedTarget = foregroundLastObservedPackage == resumeSnapshot.resumePackage ||
+                foregroundWindowStabilityState.stablePackage == resumeSnapshot.resumePackage
+            if (observedTarget) {
+                // 用户在自动前台暂停后主动点击“继续”：当前位置已经回到原棋盘应用，
+                // 不能再走“把自动暂停转换为手动暂停”的旧分支，否则第一次点击永远不能恢复。
+                trace("USER_CONTINUE_FROM_FOREGROUND_PAUSE", "package=${resumeSnapshot.resumePackage}")
+                resumeAfterForegroundReturn(resumeSnapshot.resumePackage)
+                return
+            }
             foregroundPauseSnapshot = null
             pauseRuntime(clearAnalysis = true)
             trace("RUN_PAUSE_DURING_FOREGROUND_SWITCH", "resumePackage=${resumeSnapshot.resumePackage}")

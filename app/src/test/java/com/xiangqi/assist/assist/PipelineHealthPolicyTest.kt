@@ -206,6 +206,47 @@ class PipelineHealthPolicyTest {
                 lastRecoveryAt = 0L)))
     }
 
+    @Test fun `active landing owns recovery until its own timeout`() {
+        val completed = 100_000L
+        val activeLanding = base(
+            now = completed + PipelineHealthPolicy.VISION_STALL_MS + 500L,
+            landingStage = LandingFlow.Stage.VERIFYING,
+            landingStartedAt = completed - 100L,
+            landingCompletedAt = completed,
+            lastFrameAt = completed,
+            lastStableAt = completed,
+            lastVisionAt = completed,
+            lastRecognitionCompletedAt = completed,
+            lastProcessedSampleAt = completed,
+            captureStartedAt = completed,
+            streamStartedAt = completed,
+        )
+        assertEquals(PipelineHealthPolicy.Action.REBASE_LANDING, PipelineHealthPolicy.evaluate(activeLanding))
+        assertEquals(
+            PipelineHealthPolicy.Action.REBASE_LANDING,
+            PipelineHealthPolicy.evaluate(activeLanding.copy(now = completed + PipelineHealthPolicy.LANDING_ABSOLUTE_MS + 1L)),
+        )
+    }
+
+    @Test fun `landing in progress suppresses global capture reset before landing timeout`() {
+        val completed = 100_000L
+        val activeLanding = base(
+            now = completed + PipelineHealthPolicy.VISION_STALL_MS + 500L,
+            landingStage = LandingFlow.Stage.VERIFYING,
+            landingStartedAt = completed - 100L,
+            landingCompletedAt = completed,
+            lastFrameAt = completed,
+            lastStableAt = completed,
+            lastVisionAt = completed,
+            lastRecognitionCompletedAt = completed,
+            lastProcessedSampleAt = completed,
+            captureStartedAt = completed,
+            streamStartedAt = completed,
+        )
+        // 该时刻即使全局 visionAge 已超过 VISION_STALL_MS，也不能返回 RESET_VISION。
+        assertTrue(PipelineHealthPolicy.evaluate(activeLanding) != PipelineHealthPolicy.Action.RESET_VISION)
+        assertTrue(PipelineHealthPolicy.evaluate(activeLanding) != PipelineHealthPolicy.Action.REBUILD_CAPTURE)
+    }
     @Test fun `landing grace and absolute limit are halved`() {
         val completed = 100_000L
         val noProgress = base(now = completed + PipelineHealthPolicy.LANDING_FRAME_GRACE_MS - 1L,

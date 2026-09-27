@@ -459,12 +459,13 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 - [x] 日志第1行是 `SESSION|generation=20|reason=user_reset`，随后立即记录 `RUN_RESET`；说明此前更早的会话轨迹已被“重置”动作清空，本文件无法还原 reset 之前为何开始异常。
 - [x] 本文件内反复出现检测结果为 18–20 子并拒绝“红帅数量异常:0”；之后识别到 17–18 子的棋面并进入 `BOARD_CONFIRMED`，引擎和自动落子继续执行。
 - [x] 最末一轮：`b9b0` 已有 `CHANNEL_RESULT connected=true valid=true`、`MOVE_DISPATCH`、`GESTURE_FINISHED`；随后停在 `VERIFYING`，约 1.3 秒触发 `RESET_VISION`，约 1.8 秒触发 `REBASE_LANDING`。约 20 毫秒后出现 `RUN_PAUSE`，约 0.47 秒后记录面板缩为悬浮球；此后观察到用户离开棋盘应用，日志结束于 Launcher 前台观察。现有日志不能证明最后的挂起是 watchdog 永远无响应还是用户暂停/离开应用后的观察停止；缺少明确按钮点击记录，需补日志后复测定位。
+- [x] 代码复核确认：全局看门狗在落子事务尚未超时前可能先执行 `RESET_VISION`，与 `VERIFYING` 专用恢复竞争；现已改为落子事务存在时全局恢复让出控制权，只由落子专用时钟负责超时重建；同时修复自动前台暂停后用户首次点击“继续”被错误转成手动暂停的分支。
 - [x] 当前 logger 的 `service_create`、`capture_start`、`run_start`、`user_reset` 多处都会调用清理旧日志的 `startSession()`；其中 `user_reset` 会在故障处理中途直接删除此前完整轨迹，是本轮已证实的日志丢失根因。
 
 ### 实施与验收清单
 - [x] 日志只在成功完成“一键准备”时启动新会话并清理上一份旧日志；开始/继续、暂停、重置及自动授权续接均复用同一文件。`startSession()`活动中幂等，不再清理内容。
 - [x] 一键关闭写入关闭动作和会话结束标记并停止后续写入；结束日志保留供用户反馈，下一次成功准备才清理旧日志。进程被强制结束时保留已落盘内容；下次准备再开启新日志。
 - [x] 每次悬浮窗主动按钮操作在副作用执行前写入 `USER_ACTION`（含人类可读操作名），覆盖开始/继续/暂停、重置、更新棋谱、悔棋、工作/自动走子/执子方/走棋方/变招/强度/思考模式/候选数/Hash/框选、缩小、关闭；关闭二次确认首击和手动小棋盘点格坐标也记录。
-- [x] ARMv8 / dotprod Kotlin 主源码和测试源码编译通过；logger 新增会话延续、重置不中断、关闭后保留、下一次准备才清理、准备前不写入等3项测试，在两个变体均通过。`git diff --check`通过。
-- [!] 本地 ARMv8 全量 JVM 测试仍有 8 项 Robolectric/Canvas 测试因 `UnsatisfiedLinkError` 缺少 `conscrypt_openjdk_jni-linux-aarch_64` 失败；与本次logger测试无关，远程 CI 双变体验证待跑。
-- [ ] 推送后等待 GitHub Actions 两变体完整测试/构建通过；签名设备包生成后仍需目标设备重新复现卡死并把带 `USER_ACTION` 的完整会话日志回传。
+- [x] ARMv8 / dotprod Kotlin 主源码和测试源码编译通过；logger新增会话延续、重置不中断、关闭后保留、下一次准备才清理、准备前不写入等3项测试，以及看门狗在落子事务期间让出全局恢复、自动前台暂停首次点击继续恢复等测试，在两个变体均通过。`git diff --check`通过。
+- [!] 本地 ARMv8 全量 JVM 测试仍有 8 项 Robolectric/Canvas 测试因 `UnsatisfiedLinkError` 缺少 `conscrypt_openjdk_jni-linux-aarch_64` 失败；与本次logger及看门狗策略测试无关，远程 CI 双变体验证待跑。
+- [ ] 推送后等待 GitHub Actions 双变体完整测试/构建通过；签名设备包生成后仍需目标设备重新复现卡死，并回传带 `USER_ACTION` 的完整会话日志。

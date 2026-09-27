@@ -65,7 +65,12 @@ object PipelineHealthPolicy {
 
         // A dispatched gesture must never be interrupted by capture recovery. Its own clock
         // nevertheless closes a genuinely stuck verify transaction, even if capture died.
-        if (h.landingStage != null && landingStalled(h)) return Action.REBASE_LANDING
+        // 落子核对期间由落子专用时钟负责恢复；不能让全局识别/采帧看门狗同时
+        // RESET_VISION 或 REBUILD_CAPTURE，否则会清空核对所需的新帧窗口，形成
+        // VERIFYING -> RESET_VISION -> 再次超时的卡死环。未超时时必须完全让出控制权。
+        if (h.landingStage != null) {
+            return if (landingStalled(h)) Action.REBASE_LANDING else Action.NONE
+        }
         if (!h.needsFrames || !h.captureAlive) return Action.NONE
 
         val pendingAge = if (h.recognitionPending && h.recognitionPendingSinceAt > 0L)
