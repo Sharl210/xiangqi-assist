@@ -110,10 +110,15 @@ object YoloPostprocessor {
             if (!overlapped) keep.add(r)
         }
 
+        // 类别感知 NMS 后，只有具备校准证据时才能跨类别合并候选；当前没有独立校准集，
+        // 因而跨类别框全部保留并交给格点冲突安全门。不能凭分数高低猜哪个标签正确。
+        // 同类重叠仍由上面的类别感知 NMS 处理。
+        val duplicateClean = keep
+
         // 640 输入域 -> 原始帧域
         fun toFrame(v: Double, pad: Double) = (v - pad) / lb.scale
-        val dets = ArrayList<YoloDetection>(keep.size)
-        for (r in keep) {
+        val dets = ArrayList<YoloDetection>(duplicateClean.size)
+        for (r in duplicateClean) {
             val x1 = toFrame(r.x1, lb.padX); val y1 = toFrame(r.y1, lb.padY)
             val x2 = toFrame(r.x2, lb.padX); val y2 = toFrame(r.y2, lb.padY)
             dets.add(YoloDetection(r.labelId, r.score,

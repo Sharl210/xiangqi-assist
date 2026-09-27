@@ -47,4 +47,22 @@ class DetectionRecoveryCropPolicyTest {
         )
         assertNull(DetectionRecoveryCropPolicy.fromPieceBoundingGrid(anchored, 1200, 1800))
     }
+
+    @Test
+    fun `raw detections can produce a recovery crop without mapped board`() {
+        val detections = (0 until 12).map { i ->
+            YoloDetection(
+                labelId = if (i % 2 == 0) 7 else 8,
+                score = 0.8,
+                cx = 200.0 + (i % 4) * 60.0,
+                cy = 400.0 + (i / 4) * 90.0,
+                w = 60.0,
+                h = 60.0,
+            )
+        }
+        val result = DetectionRecoveryCropPolicy.fromPieceDetections(detections, 800, 1200)
+        assertNotNull(result)
+        assert(result!!.rect[2] > result.rect[0])
+        assert(result.rect[3] > result.rect[1])
+    }
 }

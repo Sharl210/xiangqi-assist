@@ -234,12 +234,12 @@ class YoloBoardDetector(
         }
         var criticalRecoveryUsed = false
 
-        // Lite 兜底模型在当前样本中有低分异类框与高分真框落在同一格的情况。
-        // 只在已有冲突时，用同一帧、同一原始输出做一次较严格置信阈值复核；候选必须无冲突、
-        // 双王恰各一枚、棋面合法，且修复后的棋子数不得少于安全门映射基线，才允许替换。
-        // 这是基于模型自己的低分候选过滤，不借用旧棋面，也不改变Medium正常阈值。
+        // Lite同格冲突时只做一次轻微的阈值复核。当前样本扫描显示0.47可剔除低分冲突框；
+        // 复核必须保留完全相同的棋盘格子与棋子数、通过双王/合法棋面门，且冲突清零，
+        // 才能接受。只要棋面发生任何变化，仍拒绝并保留原冲突结果。
         if (modelTier == YoloModelTier.LITE && mapped?.cellClassConflicts?.isNotEmpty() == true) {
-            val baselinePieceCount = mapped!!.pieceCount
+            val baseline = mapped!!
+            val baselinePieceCount = baseline.pieceCount
             val conservativeDetections = YoloPostprocessor.decode(
                 output[0], lb, cw, ch,
                 confThreshold = LITE_CONFLICT_RECOVERY_CONF_THRESHOLD,
@@ -256,10 +256,11 @@ class YoloBoardDetector(
                 preferAnchor = cropHint != null && anchor != null,
             )
             if (isSafeRecoveredBoard(conservativeMapped) &&
-                conservativeMapped!!.pieceCount >= baselinePieceCount
+                conservativeMapped!!.pieceCount == baselinePieceCount &&
+                AssistBoard.equal(baseline.canonical, conservativeMapped.canonical)
             ) {
                 mapped = conservativeMapped
-                lastDetectionSummary = "lite-conflict-recovery=0.55;$lastDetectionSummary"
+                lastDetectionSummary = "lite-conflict-recovery=0.47;$lastDetectionSummary"
             }
         }
 
@@ -323,9 +324,8 @@ class YoloBoardDetector(
         if (allowBoardZoom && cropHint == null && shifted.none { it.isBoard } &&
             (mapped == null || !isSafeRecoveredBoard(mapped))
         ) {
-            val recovery = DetectionRecoveryCropPolicy.fromPieceBoundingGrid(
-                mapped, frame.width, frame.height,
-            )
+            val recovery = DetectionRecoveryCropPolicy.fromPieceBoundingGrid(mapped, frame.width, frame.height)
+                ?: DetectionRecoveryCropPolicy.fromPieceDetections(shifted, frame.width, frame.height)
             if (recovery != null) {
                 val zoomMapped = detectInternal(
                     frame = frame,
@@ -513,10 +513,10 @@ class YoloBoardDetector(
         private fun expectedOutputShape(): IntArray =
             intArrayOf(1, YoloPostprocessor.ANCHORS, YoloPostprocessor.DIMS)
 
-        /** Lite同格冲突复核允许低置信棋盘框，棋子框仍使用0.55严格阈值。 */
+        /** Lite同格冲突复核允许低置信棋盘框，棋子框使用冲突复核阈值0.47。 */
         private const val LITE_RECOVERY_BOARD_CONF_THRESHOLD = 0.20
-        /** Lite同格冲突救援阈值：只过滤低分候选，不覆盖未冲突结果。 */
-        private const val LITE_CONFLICT_RECOVERY_CONF_THRESHOLD = 0.55
+        /** Lite同格冲突复核阈值；同格冲突成立时才用于重新解码一次。 */
+        private const val LITE_CONFLICT_RECOVERY_CONF_THRESHOLD = 0.47
         /** 关键棋子救援只降低置信度门槛，不改变正常帧的严格门槛。 */
         private const val CRITICAL_RECOVERY_CONF_THRESHOLD = 0.30
         /** 整屏推理少于该数量且已有 board 框时，触发一次 board ROI 放大复核。 */

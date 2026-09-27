@@ -101,6 +101,40 @@ class YoloPipelineTest {
         assertTrue("类别置信度接近时应等待下一次稳定窗口，而不是猜成车/炮", dets.isEmpty())
     }
     @Test
+    fun `cross class overlap remains visible to conflict safety gate`() {
+        val lb = YoloPostprocessor.Letterbox.forFrame(640, 640)
+        val rows = Array(YoloPostprocessor.ANCHORS) { FloatArray(YoloPostprocessor.DIMS) }
+        put(rows, 0, 320f, 320f, 60f, 60f, 0.98f, 7)
+        put(rows, 1, 320f, 320f, 60f, 60f, 0.60f, 8)
+        val dets = YoloPostprocessor.decode(rows, lb, 640, 640, confThreshold = 0.45)
+        assertEquals("未校准时不得按置信分差删除跨类别候选", 2, dets.size)
+        assertTrue(dets.any { it.labelId == 7 })
+        assertTrue(dets.any { it.labelId == 8 })
+    }
+
+    @Test
+    fun `slightly higher recovery threshold filters only the weak overlapping candidate`() {
+        val lb = YoloPostprocessor.Letterbox.forFrame(640, 640)
+        val rows = Array(YoloPostprocessor.ANCHORS) { FloatArray(YoloPostprocessor.DIMS) }
+        put(rows, 0, 320f, 320f, 60f, 60f, 0.88f, 7)
+        put(rows, 1, 320f, 320f, 60f, 60f, 0.47f, 8)
+        val baseline = YoloPostprocessor.decode(rows, lb, 640, 640, confThreshold = 0.45)
+        val recovered = YoloPostprocessor.decode(rows, lb, 640, 640, confThreshold = 0.47)
+        assertEquals(2, baseline.size)
+        assertEquals(1, recovered.size)
+        assertEquals(7, recovered.single().labelId)
+    }
+    @Test
+    fun `nearby cross class boxes are not silently merged`() {
+        val lb = YoloPostprocessor.Letterbox.forFrame(640, 640)
+        val rows = Array(YoloPostprocessor.ANCHORS) { FloatArray(YoloPostprocessor.DIMS) }
+        put(rows, 0, 300f, 320f, 48f, 48f, 0.98f, 7)
+        put(rows, 1, 345f, 320f, 48f, 48f, 0.96f, 8)
+        val dets = YoloPostprocessor.decode(rows, lb, 640, 640, confThreshold = 0.45)
+        assertEquals("相邻棋子不能因为类别不同而被合并", 2, dets.size)
+    }
+
+    @Test
     fun `wide button like boxes are aspect filtered`() {
         val lb = YoloPostprocessor.Letterbox.forFrame(640, 640)
         val rows = Array(YoloPostprocessor.ANCHORS) { FloatArray(YoloPostprocessor.DIMS) }
