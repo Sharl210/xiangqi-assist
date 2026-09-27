@@ -400,3 +400,31 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 - [x] 模型选择仅保存配置，不创建或展开悬浮窗；下次准备/开始时才读取并应用配置，帮助文案同步为“样本评测”而非开发基线。
 - [ ] 用1.3.4签名测试包在目标设备验证：未点“一键准备”时切换多个应用不出现悬浮球、不启动识别、不产生前台恢复；点“一键准备”后再验证暂停、开始、切出、返回和关闭流程。
 - [ ] 目标设备重新回传日志后，确认同格冲突只进入日志而不把内部字段显示给用户；同时继续完成10张样本逐格真值和真机回归。
+
+## P22 用户新增要求：自动落子通道恢复与模型选择页净化
+
+### 用户新增要求（原文见 request.md 末两条）
+- 真机日志显示：识别成功后自动落子完全用不了，落不了子。
+- 模型选择页不得展示开发侧测试结果；用户只看模型名称。
+
+### 已定位根因（来自用户 2026-09-27 真机日志）
+- [x] 根因A：`MOVE_PREPARE` 触发的静默通道保险会重启无障碍服务，探测线程在此期间把“无障碍实例短暂为空”上报为 `accessibility-disconnected`，被当成前台未知并立即安全暂停；该暂停又调用 `clearLandingTransaction` 递增通道代号，使保险回调 `valid=false`，刚建立的落子事务在同一毫秒失效。
+- [x] 根因B：安全暂停期间基准包名仍是原棋盘应用，切换事件永远不触发，`handleForegroundReturnConfirmed` 永不被调用，会话永久停在暂停态，之后所有落子都不可能发生。
+- [x] 根因C：暂停与切出提示把内部原因串和包名（`accessibility-disconnected`、`cn.jj.chess.nearme.gamecenter`）直接写进悬浮窗文案。
+
+### 修复动作
+- [x] `ForegroundPausePolicy` 新增 `observeAvailability`：只有连续 `UNAVAILABLE_PAUSE_SAMPLES`(=稳定门帧数) 次不可用才判定前台未知；任何一次可用观察清零。
+- [x] `ForegroundPausePolicy` 新增 `observeReturn`：安全暂停后按同一稳定门连续确认原应用回到前台即恢复，不依赖基准包名是否变化。
+- [x] `ScreenAssistService` 在通道保险进行中把不可用观察记为 `FOREGROUND_UNAVAILABLE_GRACE`，不计入暂停判定。
+- [x] `ScreenAssistService` 在稳定判定前先跑返回确认，命中即 `FOREGROUND_RETURN_STABLE` 并恢复，避免永久暂停。
+- [x] 悬浮窗文案去掉内部原因串与包名；诊断信息保留在 `VISION_RAW`/`VISION_REJECT`/`FOREGROUND_*` 日志。
+- [x] `YoloModelTier` 删除 `sampleScore`/`sampleScoreText()`，`selectionHint` 改为无评分的用途描述；模型选择弹窗、按钮、提示、`help.html` 同步只显示模型名称与用途。
+- [x] `YoloModelTierTest` 改为断言用户可见文案不含 `/100` 与“样本”字样。
+- [x] `ForegroundPausePolicyTest` 新增瞬时不可用不触发暂停、可用观察清零计数、安全暂停无基准变化也能确认返回、非全屏/他应用/手动暂停不误恢复四组断言。
+- [x] 本地校验：`:app:compileArmv8-DebugKotlin`、`:app:compileArmv8-DebugUnitTestKotlin` 通过（以 `-x processArmv8-DebugResources` 跳过本机不可执行的 x86_64 AAPT2）；定向单测 `ForegroundPausePolicyTest`(8)、`ForegroundWindowStabilityPolicyTest`、`ForegroundAppPolicyTest`、`YoloModelTierTest`(6)、`AutoChannelRestartPolicyTest` 全部通过。
+
+### 仍未完成（不得视为交付）
+- [ ] 目标设备安装新构建包复测：未点“一键准备”切应用不出现悬浮球/识别；点“一键准备”后自动落子能真正落子。
+- [ ] 复现并确认通道保险期间的瞬时断连不再中断落子事务。
+- [ ] 回传设备日志确认切出/回来自动恢复，且悬浮窗不再出现内部原因串与包名。
+- [ ] 10 张样本逐格人工真值与 Medium/Lite 最终验收仍未完成；主机 10/10 只是几何安全候选，不等于逐格正确。

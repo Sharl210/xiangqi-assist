@@ -493,13 +493,14 @@ class AssistActivity : AppCompatActivity() {
         refreshStatus()
     }
 
-    /** 选择识别模型。只保存用户偏好；下一次准备/开始时才按当前样本评分排序的配置探测并加载。 */
+    /**
+     * 选择识别模型。只保存用户偏好；下一次准备/开始时才做兼容性检查并加载配置。
+     * 选项只给出模型名称和用途，实验评分属开发侧资料，不进用户界面。
+     */
     private fun showYoloModelChooser() {
         val cfg = AssistConfig(this)
         val tiers = listOf(YoloModelTier.MEDIUM, YoloModelTier.LITE)
-        val labels = tiers.map { tier ->
-            "${tier.displayName}：样本评测${tier.sampleScoreText()}；${tier.selectionHint}"
-        }.toTypedArray()
+        val labels = tiers.map { tier -> "${tier.displayName}：${tier.selectionHint}" }.toTypedArray()
         val current = tiers.indexOf(cfg.yoloModelTier).coerceAtLeast(0)
         AlertDialog.Builder(this)
             .setTitle("选择识别模型")
@@ -520,7 +521,7 @@ class AssistActivity : AppCompatActivity() {
     }
 
     private fun yoloHint(tier: YoloModelTier): String =
-        "${tier.selectionHint}。样本评测${tier.sampleScoreText()}（有限样本安全门结果，不是准确率）；兼容性失败时按${tier.fallbackOrder().joinToString("→") { it.displayName }}回退。负载、温度和功耗不会强制回退。"
+        "${tier.selectionHint}；兼容性检查失败时按${tier.fallbackOrder().joinToString("→") { it.displayName }}顺序回退。负载、温度和功耗不会强制回退。"
 
     /**
      * 落子方式开关。默认点击式：先点棋子，再点目标格；只有用户明确切换才用拖动式。
@@ -666,7 +667,7 @@ class AssistActivity : AppCompatActivity() {
         val modelConfig = AssistConfig(this)
         val selectedModel = modelConfig.yoloModelTier
         val activeModel = svc?.yoloModelTier()
-        btnYoloModel.text = "识别模型：${selectedModel.displayName}（基线${selectedModel.sampleScoreText()}）"
+        btnYoloModel.text = "识别模型：${selectedModel.displayName}"
         val runtimePending = prepared && activeModel != null && activeModel != selectedModel
         val modelMessage = svc?.yoloModelSelectionMessage()?.takeIf { it.isNotBlank() }
         tvYoloHint.text = when {

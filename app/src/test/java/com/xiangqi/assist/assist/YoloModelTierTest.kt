@@ -14,7 +14,13 @@ class YoloModelTierTest {
         assertEquals("MEDIUM", YoloModelTier.DEFAULT_NAME)
         assertEquals(YoloModelTier.MEDIUM, YoloModelTier.fromStored(null))
         assertEquals(YoloModelTier.MEDIUM, YoloModelTier.fromStored("old-value"))
-        assertTrue(YoloModelTier.MEDIUM.sampleScore > YoloModelTier.LITE.sampleScore)
+        assertTrue(YoloModelTier.MEDIUM.selectionHint.isNotBlank())
+        assertTrue(YoloModelTier.LITE.selectionHint.isNotBlank())
+        // 实验评分属开发侧资料，不得出现在用户可读的模型说明里。
+        for (tier in YoloModelTier.values()) {
+            assertFalse(tier.selectionHint.contains("/100", ignoreCase = true))
+            assertFalse(tier.selectionHint.contains("样本", ignoreCase = true))
+        }
     }
 
     @Test

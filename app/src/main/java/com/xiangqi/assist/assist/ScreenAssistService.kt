@@ -1191,6 +1191,10 @@ class ScreenAssistService : Service() {
     @Volatile private var foregroundBaselinePackage: String? = null
     @Volatile private var foregroundWindowStabilityState = ForegroundWindowStabilityPolicy.State()
     @Volatile private var foregroundPauseSnapshot: ForegroundPausePolicy.Snapshot? = null
+    /** 前台观察连续不可用计数；只有连续确认不可用才进入安全暂停。 */
+    @Volatile private var foregroundAvailabilityState = ForegroundPausePolicy.AvailabilityState()
+    /** 安全暂停后“原应用已稳定回到前台”的确认计数。 */
+    @Volatile private var foregroundReturnState = ForegroundPausePolicy.ReturnState()
     @Volatile private var foregroundLastEventAt = 0L
     @Volatile private var foregroundLastTraceAt = 0L
     @Volatile private var foregroundLastObservedPackage: String? = null
@@ -1844,12 +1848,27 @@ class ScreenAssistService : Service() {
             observationAvailable = unavailableReason == null,
         )
         foregroundWindowStabilityState = observed.state
-        if (unavailableReason != null &&
+        // 本应用自己的通道保险会短暂断开无障碍服务；这段窗口属于已知瞬时状态，
+        // 不能算作“前台未知”，否则会把自己的恢复动作误判成切出并打断当前落子事务。
+        val channelRestartGrace = autoChannelRestartInFlight.get()
+        val availability = ForegroundPausePolicy.observeAvailability(
+            state = foregroundAvailabilityState,
+            observationAvailable = unavailableReason == null || channelRestartGrace,
+        )
+        foregroundAvailabilityState = availability.first
+        if (unavailableReason != null && channelRestartGrace) {
+            trace("FOREGROUND_UNAVAILABLE_GRACE", "reason=$unavailableReason channelRestart=true")
+        }
+        if (availability.second &&
             foregroundBaselinePackage != null &&
             !paused &&
             foregroundPauseSnapshot == null
         ) {
-            pauseForForegroundObservationUnavailable(unavailableReason)
+            trace(
+                "FOREGROUND_UNAVAILABLE_CONFIRMED",
+                "reason=${unavailableReason ?: "unavailable"} frames=${availability.first.unavailableFrames}"
+            )
+            pauseForForegroundObservationUnavailable(unavailableReason ?: "foreground-unknown")
         }
         if (observedPackage != foregroundLastObservedPackage ||
             foregroundLastObservedFullScreen != isFullScreen ||
@@ -1868,6 +1887,25 @@ class ScreenAssistService : Service() {
             foregroundLastObservedPackage = observedPackage
             foregroundLastObservedFullScreen = isFullScreen
             foregroundLastObservationReason = unavailableReason
+        }
+        // 安全暂停期间基准包名可能仍是同一个应用，切换事件永远不会到达；
+        // 因此这里独立确认“原应用已连续稳定回到前台”，避免会话永久停在暂停态。
+        val returnSnapshot = foregroundPauseSnapshot
+        val returnConfirmed = ForegroundPausePolicy.observeReturn(
+            snapshot = returnSnapshot,
+            state = foregroundReturnState,
+            packageName = packageName,
+            isFullScreen = isFullScreen,
+        )
+        foregroundReturnState = returnConfirmed.first
+        if (returnConfirmed.second && returnSnapshot != null) {
+            trace(
+                "FOREGROUND_RETURN_STABLE",
+                "package=${returnSnapshot.resumePackage} frames=${FrameStabilityPolicy.REQUIRED_STABLE_FRAMES} " +
+                    "wasRunning=${returnSnapshot.wasRunning}"
+            )
+            handleForegroundReturnConfirmed(returnSnapshot.resumePackage)
+            return
         }
         when (val decision = observed.decision) {
             ForegroundWindowStabilityPolicy.Decision.IGNORE -> Unit
@@ -1909,7 +1947,7 @@ class ScreenAssistService : Service() {
                         } else {
                             // 切出前本来就是暂停态：不启动识别，只记录恢复目标，
                             // 返回后再次确认暂停状态，不能自动变成运行态。
-                            setStatus("检测到前台应用已切换（$from → ${decision.current}）\n保持切出前的暂停状态；返回原应用后仍保持暂停")
+                            setStatus("检测到已切到其他应用\n保持切出前的暂停状态，回到棋盘应用后仍保持暂停")
                             postRender()
                         }
                     }
@@ -1936,7 +1974,7 @@ class ScreenAssistService : Service() {
             "reason=$reason resumePackage=$target wasRunning=${captured.wasRunning}",
         )
         pauseRuntime(clearAnalysis = true, preserveForegroundIntent = true)
-        setStatus("暂时无法确认前台应用（$reason）\n已安全暂停屏幕输出，确认回到原棋盘应用后自动恢复")
+        setStatus("暂时无法确认当前画面所属应用\n已安全暂停识别，确认回到棋盘应用后会自动恢复")
         postRender()
     }
 
@@ -1963,8 +2001,9 @@ class ScreenAssistService : Service() {
      * 返回原应用时仅当快照记录为运行中才自动恢复，并从当前画面重建棋面基线。
      */
     private fun pauseForForegroundSwitch(currentPackage: String) {
+        trace("FOREGROUND_SWITCH_PAUSE_APPLIED", "currentPackage=$currentPackage wasRunning=true")
         pauseRuntime(clearAnalysis = true, preserveForegroundIntent = true)
-        setStatus("检测到前台应用已切换（$currentPackage）\n已暂停屏幕输出但保留授权；回到原应用后自动恢复")
+        setStatus("检测到已切到其他应用\n已暂停识别但保留授权，回到棋盘应用后自动恢复")
         postRender()
     }
 

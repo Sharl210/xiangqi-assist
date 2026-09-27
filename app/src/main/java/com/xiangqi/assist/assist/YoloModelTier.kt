@@ -2,29 +2,26 @@ package com.xiangqi.assist.assist
 
 /**
  * 当前产品仅保留两份原始中国象棋 V5 权重：Medium 为默认主模型，Lite 为兼容性最终回退。
- * 分数是当前10张实验样本的安全门基线，不是逐格准确率或通用 mAP；逐格标注前不得宣称无误。
+ *
+ * 这里的 [selectionHint] 只描述用途，不携带任何实验评分或样本通过数：
+ * 实验样本的逐张结论属于开发侧资料（见 `docs/两模型样本优化记录.md`、
+ * `docs/移动端模型替换评估.md`），展示给用户的只有模型名称和用途。
  */
 enum class YoloModelTier(
     val displayName: String,
     val fileName: String,
     val selectionHint: String,
-    /** 当前10张样本上的安全门基线，不是通用准确率。 */
-    val sampleScore: Double,
 ) {
     MEDIUM(
         displayName = "Medium",
         fileName = "yolov5m_xq_fp32.tflite",
-        selectionHint = "原始 V5 Medium，中国象棋主模型；样本评测7/10通过安全门",
-        sampleScore = 78.1,
+        selectionHint = "识别效果优先的默认模型",
     ),
     LITE(
         displayName = "Lite",
         fileName = "yolov5n_xq_fp16.tflite",
-        selectionHint = "原始 V5 Lite，Medium兼容性失败时的最终回退；样本评测4/10通过安全门",
-        sampleScore = 67.2,
+        selectionHint = "占用更低的轻量模型，仅在默认模型无法运行时使用",
     );
-
-    fun sampleScoreText(): String = "${sampleScore}/100"
 
     /** 仅在模型运行时兼容性检查失败时按 Medium→Lite 回退；Lite 不再反向切回主模型。 */
     fun fallbackOrder(): List<YoloModelTier> = when (this) {
