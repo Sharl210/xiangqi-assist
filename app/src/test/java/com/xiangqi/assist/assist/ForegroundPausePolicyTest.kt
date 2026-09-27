@@ -88,6 +88,26 @@ class ForegroundPausePolicyTest {
     }
 
     @Test
+    fun `return confirmation fires once per pause so a failed resume cannot retry every second`() {
+        val snapshot = ForegroundPausePolicy.capture(paused = false, resumePackage = "cn.jj.chess")
+        var state = ForegroundPausePolicy.ReturnState()
+        repeat(FrameStabilityPolicy.REQUIRED_STABLE_FRAMES) {
+            state = ForegroundPausePolicy.observeReturn(snapshot, state, "cn.jj.chess", isFullScreen = true).first
+        }
+        assertTrue(state.fired)
+        repeat(FrameStabilityPolicy.REQUIRED_STABLE_FRAMES * 3) {
+            val step = ForegroundPausePolicy.observeReturn(snapshot, state, "cn.jj.chess", isFullScreen = true)
+            state = step.first
+            assertFalse("同一次暂停不应重复确认返回", step.second)
+        }
+        // 快照被清理后计数与已确认标记一起归零，下一次暂停仍能正常确认。
+        assertEquals(
+            ForegroundPausePolicy.ReturnState(),
+            ForegroundPausePolicy.observeReturn(null, state, "cn.jj.chess", isFullScreen = true).first,
+        )
+    }
+
+    @Test
     fun `return confirmation ignores other apps, non full screen samples and manual pauses`() {
         val snapshot = ForegroundPausePolicy.capture(paused = false, resumePackage = "cn.jj.chess")
         val start = ForegroundPausePolicy.ReturnState("cn.jj.chess", 5)

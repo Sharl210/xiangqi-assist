@@ -26,8 +26,12 @@ object ForegroundPausePolicy {
     /** 前台观察可用性的连续计数；任何一次可用观察都会清零。 */
     data class AvailabilityState(val unavailableFrames: Int = 0)
 
-    /** “快照目标应用已稳定回到前台”的连续计数。 */
-    data class ReturnState(val packageName: String? = null, val frames: Int = 0)
+    /** “快照目标应用已稳定回到前台”的连续计数；一次暂停周期内只确认一次。 */
+    data class ReturnState(
+        val packageName: String? = null,
+        val frames: Int = 0,
+        val fired: Boolean = false,
+    )
 
     /**
      * 累计前台观察不可用的连续样本。
@@ -51,7 +55,8 @@ object ForegroundPausePolicy {
      *
      * 这里不依赖基准包名发生变化：安全暂停期间基准包名可能仍是同一个应用，
      * 只靠切换事件永远等不到恢复，会话会一直停在暂停态。
-     * 返回值第二项为 true 表示确认一次；计数随后归零，等待调用方清理快照。
+     * 返回值第二项为 true 表示确认一次；同一次暂停只确认一次，恢复尝试失败也不会
+     * 每秒重复申请授权，下一次真实切换仍走正常的切换判定。
      */
     fun observeReturn(
         snapshot: Snapshot?,
@@ -64,10 +69,11 @@ object ForegroundPausePolicy {
         val pkg = packageName?.trim().orEmpty()
         if (pkg.isEmpty() || !isFullScreen) return ReturnState() to false
         if (pkg != snapshot.resumePackage) return ReturnState() to false
+        if (state.fired && state.packageName == pkg) return ReturnState(pkg, 0, fired = true) to false
         val required = requiredStableFrames.coerceAtLeast(1)
         val frames = if (state.packageName == pkg) state.frames + 1 else 1
         if (frames < required) return ReturnState(pkg, frames) to false
-        return ReturnState(pkg, 0) to true
+        return ReturnState(pkg, 0, fired = true) to true
     }
 
     fun capture(

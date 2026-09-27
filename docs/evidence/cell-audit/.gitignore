@@ -1,0 +1,6 @@
+# 逐格核对标注图体积大（约 50MB，20 张），不入版本库；
+# 文本与结构化候选结果（README.md、candidate_cells.json）随仓库提交。
+# 重新生成：
+#   PYTHONPATH=/workspace/xqdk-model-venv/lib/python3.12/site-packages /usr/bin/python3 \
+#     tools/render_cell_audit.py --probe docs/evidence/xqdk-v5-medium-lite-host-probe-2026-09-27-rerun.json --out docs/evidence/cell-audit
+*.png

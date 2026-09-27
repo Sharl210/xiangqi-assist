@@ -423,8 +423,17 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 - [x] `ForegroundPausePolicyTest` 新增瞬时不可用不触发暂停、可用观察清零计数、安全暂停无基准变化也能确认返回、非全屏/他应用/手动暂停不误恢复四组断言。
 - [x] 本地校验：`:app:compileArmv8-DebugKotlin`、`:app:compileArmv8-DebugUnitTestKotlin` 通过（以 `-x processArmv8-DebugResources` 跳过本机不可执行的 x86_64 AAPT2）；定向单测 `ForegroundPausePolicyTest`(8)、`ForegroundWindowStabilityPolicyTest`、`ForegroundAppPolicyTest`、`YoloModelTierTest`(6)、`AutoChannelRestartPolicyTest` 全部通过。
 
+### 复习发现的缺陷与二次收敛（本轮）
+- [x] 缺陷1：`onForegroundWindowEvent` 里新增的返回确认放在了切换判定之前并直接 `return`，会跳过基准包名更新；真机“切走再切回”的正常路径会一直卡在恢复失败判定上。改为仅在“基准包名未变化（安全暂停场景）”时启用独立返回确认，正常切换仍由切换判定处理，避免一次返回被两条路径重复处理。
+- [x] 缺陷2：返回确认每 8 帧就会再触发一次；若恢复因授权失败停下，会每秒重复申请授权。`ForegroundPausePolicy.ReturnState` 增加 `fired` 标记，同一次暂停只确认一次，快照清理后自动归零。
+- [x] 缺陷3：通道保险的无障碍恢复线程（`ensureAccessibilityForAutoPlay`）同样会短暂断开服务，但只有 `autoChannelRestartInFlight` 被豁免。豁免条件改为“通道保险或无障碍恢复任一在进行中”，日志字段改名 `selfRecovery=true`。
+- [x] `ForegroundPausePolicyTest` 增至 9 项并全部通过：新增“同一次暂停只确认一次返回”。
+- [x] 逐格核对材料：新增 `tools/render_cell_audit.py`，从主机探针 JSON 生成逐样本候选棋盘文本表、两候选逐格差异与标注图；候选选取规则统一为“棋子 ROI 复核 → 同格冲突阈值复核 → 整帧映射”，三级都必须自身 `safe_geometry` 为真。输出 `docs/evidence/cell-audit/README.md`、`candidate_cells.json`（入版本库）与 20 张标注图（体积大，已就地 `.gitignore`，供人工逐格核对）。
+- [x] 统一规则后的候选统计：Medium 10/10、Lite 10/10 几何安全候选（与此前记录的口径一致）。这仍是候选，不等于逐格正确。
+- [!] 环境事实：`/workspace/xqdk-model-venv/bin/python*` 三个入口文件为 0 字节残留，直接调用静默无输出；可用调用方式为 `PYTHONPATH=/workspace/xqdk-model-venv/lib/python3.12/site-packages /usr/bin/python3`（Pillow 12.3.0、numpy 2.2.6 可用）。未改动该 venv，避免影响其他工具。
+
 ### 仍未完成（不得视为交付）
 - [ ] 目标设备安装新构建包复测：未点“一键准备”切应用不出现悬浮球/识别；点“一键准备”后自动落子能真正落子。
 - [ ] 复现并确认通道保险期间的瞬时断连不再中断落子事务。
 - [ ] 回传设备日志确认切出/回来自动恢复，且悬浮窗不再出现内部原因串与包名。
-- [ ] 10 张样本逐格人工真值与 Medium/Lite 最终验收仍未完成；主机 10/10 只是几何安全候选，不等于逐格正确。
+- [ ] 人工基于 `docs/evidence/cell-audit/` 的 20 张标注图与 10 张原图，逐格回填真值；真值缺口未填前，Medium/Lite 只能记“几何安全候选 10/10”，不得记为逐格正确。

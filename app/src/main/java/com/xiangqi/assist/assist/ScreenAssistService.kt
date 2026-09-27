@@ -1848,16 +1848,17 @@ class ScreenAssistService : Service() {
             observationAvailable = unavailableReason == null,
         )
         foregroundWindowStabilityState = observed.state
-        // 本应用自己的通道保险会短暂断开无障碍服务；这段窗口属于已知瞬时状态，
+        // 本应用自己的通道保险与无障碍恢复会短暂断开无障碍服务；这段窗口属于已知瞬时状态，
         // 不能算作“前台未知”，否则会把自己的恢复动作误判成切出并打断当前落子事务。
-        val channelRestartGrace = autoChannelRestartInFlight.get()
+        val selfRecoveryGrace =
+            autoChannelRestartInFlight.get() || accessibilityRecoveryInFlight.get()
         val availability = ForegroundPausePolicy.observeAvailability(
             state = foregroundAvailabilityState,
-            observationAvailable = unavailableReason == null || channelRestartGrace,
+            observationAvailable = unavailableReason == null || selfRecoveryGrace,
         )
         foregroundAvailabilityState = availability.first
-        if (unavailableReason != null && channelRestartGrace) {
-            trace("FOREGROUND_UNAVAILABLE_GRACE", "reason=$unavailableReason channelRestart=true")
+        if (unavailableReason != null && selfRecoveryGrace) {
+            trace("FOREGROUND_UNAVAILABLE_GRACE", "reason=$unavailableReason selfRecovery=true")
         }
         if (availability.second &&
             foregroundBaselinePackage != null &&
@@ -1890,22 +1891,29 @@ class ScreenAssistService : Service() {
         }
         // 安全暂停期间基准包名可能仍是同一个应用，切换事件永远不会到达；
         // 因此这里独立确认“原应用已连续稳定回到前台”，避免会话永久停在暂停态。
+        // 只在基准包名没有跟随切换变化时启用：真正切到别的应用再回来，仍由下面的切换判定负责，
+        // 避免同一次返回被两条路径重复处理，也避免恢复失败时每秒重复申请授权。
         val returnSnapshot = foregroundPauseSnapshot
-        val returnConfirmed = ForegroundPausePolicy.observeReturn(
-            snapshot = returnSnapshot,
-            state = foregroundReturnState,
-            packageName = packageName,
-            isFullScreen = isFullScreen,
-        )
-        foregroundReturnState = returnConfirmed.first
-        if (returnConfirmed.second && returnSnapshot != null) {
-            trace(
-                "FOREGROUND_RETURN_STABLE",
-                "package=${returnSnapshot.resumePackage} frames=${FrameStabilityPolicy.REQUIRED_STABLE_FRAMES} " +
-                    "wasRunning=${returnSnapshot.wasRunning}"
+        val baselineUnchanged = returnSnapshot != null &&
+            foregroundBaselinePackage == returnSnapshot.resumePackage
+        if (returnSnapshot != null && baselineUnchanged) {
+            val returnConfirmed = ForegroundPausePolicy.observeReturn(
+                snapshot = returnSnapshot,
+                state = foregroundReturnState,
+                packageName = packageName,
+                isFullScreen = isFullScreen,
             )
-            handleForegroundReturnConfirmed(returnSnapshot.resumePackage)
-            return
+            foregroundReturnState = returnConfirmed.first
+            if (returnConfirmed.second) {
+                trace(
+                    "FOREGROUND_RETURN_STABLE",
+                    "package=${returnSnapshot.resumePackage} frames=${FrameStabilityPolicy.REQUIRED_STABLE_FRAMES} " +
+                        "wasRunning=${returnSnapshot.wasRunning}"
+                )
+                handleForegroundReturnConfirmed(returnSnapshot.resumePackage)
+            }
+        } else {
+            foregroundReturnState = ForegroundPausePolicy.ReturnState()
         }
         when (val decision = observed.decision) {
             ForegroundWindowStabilityPolicy.Decision.IGNORE -> Unit
