@@ -41,8 +41,10 @@ class AssistRunControlPolicyTest {
         assertTrue(AssistRunControlPolicy.shouldRunCapturePipeline(
             AssistRunControlPolicy.SessionState.RUNNING,
         ))
-        assertTrue(AssistRunControlPolicy.shouldWatchForeground(AssistRunControlPolicy.SessionState.PREPARED_PAUSED))
-        assertFalse(AssistRunControlPolicy.shouldWatchForeground(AssistRunControlPolicy.SessionState.CLOSED))
+        assertFalse(AssistRunControlPolicy.shouldObserveForeground(false, false, false))
+        assertTrue(AssistRunControlPolicy.shouldObserveForeground(true, false, false))
+        assertFalse(AssistRunControlPolicy.shouldObserveForeground(true, true, false))
+        assertFalse(AssistRunControlPolicy.shouldObserveForeground(true, false, true))
     }
 
     @Test

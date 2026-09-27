@@ -1203,7 +1203,7 @@ class ScreenAssistService : Service() {
      */
     private val foregroundProbe = object : Runnable {
         override fun run() {
-            if (!stopping && !overlayClosed) {
+            if (!stopping && !overlayClosed && preparedSession) {
                 val accessibility = AssistAccessibilityService.instance
                 if (accessibility != null) {
                     accessibility.reportCurrentForegroundWindow()
@@ -1345,20 +1345,33 @@ class ScreenAssistService : Service() {
         runtimeLogger.log(event, message)
     }
 
-    override fun onCreate() {
-        super.onCreate()
-        runtimeLogger.startSession("service_create")
-        runSessionStarted = false
-        trace("SERVICE_CREATE", "files=${runtimeLogger.directory().absolutePath}")
-        // 自动走子是持久用户开关：服务重建、无障碍断开、录屏重启都先恢复它，
-        // 只有用户明确点击关闭入口才允许写成 false。
-        autoPlayOn = config.autoPlay
+    /** 只有已准备的辅助会话才接收前台观察；未准备状态不监听、不恢复、不产生悬浮窗副作用。 */
+    private fun attachForegroundObservation() {
         AssistAccessibilityService.setGlobalForegroundObserver { pkg, full, unavailableReason ->
             mainHandler.post { onForegroundWindowEvent(pkg, full, unavailableReason) }
         }
         mainHandler.removeCallbacks(foregroundProbe)
         mainHandler.post(foregroundProbe)
         AssistAccessibilityService.instance?.reportCurrentForegroundWindow()
+    }
+
+    /** 关闭前台观察，避免服务残留时继续影响外部应用。 */
+    private fun detachForegroundObservation() {
+        AssistAccessibilityService.setGlobalForegroundObserver(null)
+        mainHandler.removeCallbacks(foregroundProbe)
+        foregroundWindowStabilityState = ForegroundWindowStabilityPolicy.State()
+        foregroundBaselinePackage = null
+        foregroundPauseSnapshot = null
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        runtimeLogger.startSession("service_create")
+        runSessionStarted = false
+        trace("SERVICE_CREATE", "files=${runtimeLogger.directory().absolutePath}")
+        // 自动走子是持久用户开关；但前台观察和悬浮窗生命周期必须等用户点击“一键准备”。
+        autoPlayOn = config.autoPlay
+        detachForegroundObservation()
         tracker = BoardTracker(confirmCount = 1)
         // 强度档位与持久化设置对齐（设置值不在档位表内时用”标准”）
         val idx = strengthLevels.indexOfFirst { it.second == config.searchDepth }
@@ -1509,12 +1522,13 @@ class ScreenAssistService : Service() {
         }
         if (!resumingPreparedSession) {
             foregroundBaselinePackage = null
-             foregroundWindowStabilityState = ForegroundWindowStabilityPolicy.State()
+            foregroundWindowStabilityState = ForegroundWindowStabilityPolicy.State()
             foregroundPauseSnapshot = null
             pendingCaptureGrant = null
             resumeCaptureWhenTargetReturns = false
             resumeAuthorizationDenied = false
         }
+        attachForegroundObservation()
         mainHandler.removeCallbacks(accessibilityWatchdog)
         recognitionEpoch++
         beginVisionEpoch()
@@ -1818,7 +1832,7 @@ class ScreenAssistService : Service() {
         isFullScreen: Boolean,
         unavailableReason: String? = null,
     ) {
-        if (stopping || overlayClosed) return
+        if (stopping || overlayClosed || !preparedSession) return
         val now = System.currentTimeMillis()
         foregroundLastEventAt = now
         val observedPackage = packageName?.trim().orEmpty()
@@ -2347,12 +2361,11 @@ class ScreenAssistService : Service() {
             // 结构不合法：本次关键帧直接拒绝，下一组稳定窗口重新检测；不把旧棋面写回当前结果。
             refresh.consumeAttempt(unusable)
             if (refresh.checkGiveUp(System.currentTimeMillis(), unusable)) {
-                val lastReject = refresh.failReason ?: unusable
                 finishRefreshRequest()
-                setStatus("更新棋谱失败：$lastReject\n已保留当前棋面，请稍后重试")
+                setStatus("更新棋谱未完成，请保持棋盘完整可见后重试")
                 postRender()
             } else {
-                setStatus("棋面仍不合法：$unusable\n拒绝当前关键帧，继续录屏稳定窗口轮询…")
+                setStatus("当前画面未确认，正在重新识别…")
             }
             return true
         }
@@ -2480,7 +2493,7 @@ class ScreenAssistService : Service() {
                 "(${conflict.row},${conflict.col})=${conflict.firstPiece}/${conflict.secondPiece} " +
                     "score=${"%.3f".format(conflict.firstScore)}/${"%.3f".format(conflict.secondScore)}"
             }
-            lastRecognitionRejectReason = "同一棋格出现不同棋子类别候选：$summary"
+            lastRecognitionRejectReason = "当前画面存在同格类别冲突"
             Log.i(TAG, "vision rejected same-cell class competition: $summary")
             return null
         }
@@ -2505,7 +2518,7 @@ class ScreenAssistService : Service() {
             // 模型没有给出可用棋面：保留滑动窗口，只把释放闸门重新打开；
             // 下一个125ms样本即可再次推理，不必重新等待八个样本。
             stableFrameWindow.rearm()
-            val reason = lastRecognitionRejectReason ?: "稳定关键帧未得到可用棋面"
+            val reason = lastRecognitionRejectReason ?: "稳定画面未确认"
             trace("VISION_REJECT", "reason=$reason epoch=$epoch phase=${refreshPhase()} misses=${yoloMissStreak + 1}")
             streamAnomalyStreak++
             yoloMissStreak++
@@ -2516,7 +2529,7 @@ class ScreenAssistService : Service() {
             }
             if (refresh.isActive) refresh.consumeAttempt(lastFailReason)
             if (yoloMissStreak == 1 || yoloMissStreak % 4 == 0) {
-                setStatus("关键帧未确认：$lastFailReason\n继续从录屏流寻找稳定画面…")
+                setStatus("正在确认棋面…")
             }
             kickCapture()
             return
@@ -2565,7 +2578,7 @@ class ScreenAssistService : Service() {
                 lastFullVisionCheckAt = 0L
             }
             if (refresh.isActive) refresh.consumeAttempt(unsafe)
-            setStatus("关键帧局面异常：$unsafe\n正在重新识别；仍需连续8个稳定样本后才接受棋面…")
+            setStatus("正在确认棋面…")
             kickCapture()
             return
         }
@@ -2830,7 +2843,7 @@ class ScreenAssistService : Service() {
                 stableFrameWindow.rearm()
                 lastFailReason = reason
                 yoloMissStreak = maxOf(yoloMissStreak, 1)
-                setStatus("棋面结构异常：$reason\n拒绝当前关键帧，正在重新识别…")
+                setStatus("当前画面未确认，正在重新识别…")
                 kickCapture()
                 requestWatchdog()
                 return@post
@@ -2857,7 +2870,7 @@ class ScreenAssistService : Service() {
                 stableFrameWindow.rearm()
                 lastFailReason = unsafe
                 yoloMissStreak = maxOf(yoloMissStreak, 1)
-                setStatus("棋面结构异常：$unsafe\n拒绝当前关键帧，正在重新识别…")
+                setStatus("当前画面未确认，正在重新识别…")
                 kickCapture()
                 requestWatchdog()
                 return@post
@@ -3906,10 +3919,9 @@ class ScreenAssistService : Service() {
             AssistPhase.WatchdogAction.FAIL_REFRESH -> {
                 refresh.consumeAttempt("取画面超时")
                 if (refresh.checkGiveUp(now, "取画面超时（未收到可用画面）")) {
-                    val lastReject = refresh.failReason
                     finishRefreshRequest()
                     syncCaptureDemand()
-                    setStatus("更新棋谱失败：${lastReject ?: "连续关键帧未通过棋面校验"}\n已保留当前棋面，请稍后重试")
+                    setStatus("更新棋谱未完成，请保持棋盘完整可见后重试")
                     postRender()
                 }
             }
@@ -3938,15 +3950,12 @@ class ScreenAssistService : Service() {
         stopping = true
         overlayClosed = true
         preparedSession = false
-        foregroundPauseSnapshot = null
-        foregroundBaselinePackage = null
-             foregroundWindowStabilityState = ForegroundWindowStabilityPolicy.State()
+        preparedIntent = false
+        detachForegroundObservation()
         captureResumePending = false
         pendingCaptureGrant = null
         resumeCaptureWhenTargetReturns = false
         resumeAuthorizationDenied = false
-        AssistAccessibilityService.setGlobalForegroundObserver(null)
-        recognitionEpoch++
         landingToken++
         landingState = null
         pendingAutoMove = null
@@ -4549,7 +4558,7 @@ class ScreenAssistService : Service() {
                 tracker.reset(currentRedGo)
                 stableFrameWindow.rearm()
                 lastFailReason = reason
-                setStatus("棋面结构异常：$reason\n拒绝当前结果，正在重新识别…")
+                setStatus("当前画面未确认，正在重新识别…")
                 kickCapture()
                 requestWatchdog()
                 postRender()
@@ -4844,6 +4853,7 @@ class ScreenAssistService : Service() {
         lastStatusText = text
         trace("STATUS", text)
         // 状态文本只触发显示刷新，绝不能因为“写了一行文字”反向启动落子。
+        if (overlayClosed || stopping) return
         val panelVisible = SideSelectionPresentationPolicy.shouldRefreshExpandedPanel(
             panelAttached = overlayPanel?.isAttachedToWindow == true,
             collapsed = config.overlayCollapsed,
@@ -4872,8 +4882,7 @@ class ScreenAssistService : Service() {
             sb.append('\n').append(recognitionStatusLine())
             sb.append('\n').append(engineStatusLine())
         }
-        lastRejectReason?.let { sb.append('\n').append("局面不可用：").append(it) }
-        if (userRefreshActive) {
+        if (refresh.isActive) {
             refresh.statusLine()?.let { sb.append('\n').append(it) }
         }
         semiAutoStatusLine()?.let { sb.append('\n').append(it) }
@@ -4881,7 +4890,7 @@ class ScreenAssistService : Service() {
         // 卡住时直接说明原因，不用让用户猜
         val reject = tracker.lastReject
         if (!manualMode && !paused && reject != null && tracker.confirmed != null) {
-            sb.append('\n').append("未采纳：").append(reject)
+            sb.append('\n').append("当前画面未确认，正在重新识别")
         }
         return sb.toString()
     }
@@ -4995,8 +5004,8 @@ class ScreenAssistService : Service() {
         }
         val fail = lastFailReason
         val miss = if (captureDemand == CaptureDemand.OFF) "" else " ×$yoloMissStreak"
-        return if (fail != null) "${prefix}识图重试中$miss · $fail$pipelineNote"
-        else "${prefix}识图中…$pipelineNote"
+        return if (fail != null) "${prefix}正在确认棋面$miss$pipelineNote"
+        else "${prefix}识别中…$pipelineNote"
     }
 
     /**
@@ -5907,7 +5916,7 @@ class ScreenAssistService : Service() {
         }
         yoloMissStreak = maxOf(yoloMissStreak, 1)
         lastFailReason = reason
-        setStatus("棋面仍不合法：$reason\n当前局面已拒绝，正在重新识别…")
+        setStatus("当前画面未确认，正在重新识别…")
         kickCapture()
         requestWatchdog()
     }
@@ -5988,6 +5997,7 @@ class ScreenAssistService : Service() {
 
     /** 只刷新显示；不推进任何业务状态。 */
     private fun requestRenderOnly(createOverlayIfMissing: Boolean = true) {
+        if (!preparedSession || stopping || overlayClosed) return
         if (!renderScheduled.compareAndSet(false, true)) return
         mainHandler.post {
             renderScheduled.set(false)

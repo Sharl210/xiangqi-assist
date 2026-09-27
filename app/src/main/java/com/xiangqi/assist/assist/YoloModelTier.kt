@@ -14,13 +14,13 @@ enum class YoloModelTier(
     MEDIUM(
         displayName = "Medium",
         fileName = "yolov5m_xq_fp32.tflite",
-        selectionHint = "原始 V5 Medium，中国象棋主模型；当前基线7/10样本通过安全门，正在继续优化",
+        selectionHint = "原始 V5 Medium，中国象棋主模型；样本评测7/10通过安全门",
         sampleScore = 78.1,
     ),
     LITE(
         displayName = "Lite",
         fileName = "yolov5n_xq_fp16.tflite",
-        selectionHint = "原始 V5 Lite，Medium兼容性失败时的最终回退；当前基线4/10样本通过安全门",
+        selectionHint = "原始 V5 Lite，Medium兼容性失败时的最终回退；样本评测4/10通过安全门",
         sampleScore = 67.2,
     );
 

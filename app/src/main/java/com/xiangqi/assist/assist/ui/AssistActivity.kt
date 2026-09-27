@@ -498,7 +498,7 @@ class AssistActivity : AppCompatActivity() {
         val cfg = AssistConfig(this)
         val tiers = listOf(YoloModelTier.MEDIUM, YoloModelTier.LITE)
         val labels = tiers.map { tier ->
-            "${tier.displayName}：样本基线${tier.sampleScoreText()}；${tier.selectionHint}"
+            "${tier.displayName}：样本评测${tier.sampleScoreText()}；${tier.selectionHint}"
         }.toTypedArray()
         val current = tiers.indexOf(cfg.yoloModelTier).coerceAtLeast(0)
         AlertDialog.Builder(this)
@@ -520,7 +520,7 @@ class AssistActivity : AppCompatActivity() {
     }
 
     private fun yoloHint(tier: YoloModelTier): String =
-        "${tier.selectionHint}。当前10张样本基线${tier.sampleScoreText()}（有限样本安全门分数，不是准确率）；兼容性失败时按${tier.fallbackOrder().joinToString("→") { it.displayName }}回退。负载、温度和功耗不会强制回退。"
+        "${tier.selectionHint}。样本评测${tier.sampleScoreText()}（有限样本安全门结果，不是准确率）；兼容性失败时按${tier.fallbackOrder().joinToString("→") { it.displayName }}回退。负载、温度和功耗不会强制回退。"
 
     /**
      * 落子方式开关。默认点击式：先点棋子，再点目标格；只有用户明确切换才用拖动式。

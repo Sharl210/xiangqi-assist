@@ -109,8 +109,9 @@ class OverlayButtonBar @JvmOverloads constructor(
                 addView(row, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.MATCH_PARENT))
                 setOnScrollChangeListener { _, scrollX, _, _, _ ->
                     if (row.childCount == 0) return@setOnScrollChangeListener
-                    val childIndex = (0 until row.childCount).firstOrNull { child ->
-                        (row.getChildAt(child) ?: return@firstOrNull false).right > scrollX
+                    val childIndex = (0 until row.childCount).firstOrNull { index ->
+                        val child = row.getChildAt(index) ?: return@firstOrNull false
+                        child.right > scrollX
                     } ?: (row.childCount - 1)
                     val child = row.getChildAt(childIndex) ?: return@setOnScrollChangeListener
                     if (child.parent !== row) return@setOnScrollChangeListener
@@ -145,17 +146,22 @@ class OverlayButtonBar @JvmOverloads constructor(
                 if (childIndex != null) scroll.post {
                     // rebuild() 可能在这个 Runnable 排队后再次执行：旧 row 已从 host
                     // 移除，或按钮数量已经变化。此时必须安静退出，不能访问空 child。
-                    if (generation != rebuildGeneration ||
-                        scroll.parent !== host ||
-                        row.parent !== scroll ||
-                        childIndex !in 0 until row.childCount
-                    ) return@post
-                    val target = row.getChildAt(childIndex) ?: return@post
-                    if (target.parent !== row) return@post
-                    scroll.scrollTo(
-                        ButtonScrollAnchorPolicy.scrollX(target.left, anchor.offsetWithinButtonPx),
-                        0,
-                    )
+                    runCatching {
+                        if (generation != rebuildGeneration ||
+                            !scroll.isAttachedToWindow ||
+                            !row.isAttachedToWindow ||
+                            scroll.parent !== host ||
+                            row.parent !== scroll
+                        ) return@runCatching
+                        val count = row.childCount
+                        if (childIndex !in 0 until count) return@runCatching
+                        val target = row.getChildAt(childIndex) ?: return@runCatching
+                        if (target.parent !== row) return@runCatching
+                        scroll.scrollTo(
+                            ButtonScrollAnchorPolicy.scrollX(target.left, anchor.offsetWithinButtonPx),
+                            0,
+                        )
+                    }
                 }
             }
         }

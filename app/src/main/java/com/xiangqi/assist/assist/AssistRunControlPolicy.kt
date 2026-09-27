@@ -40,8 +40,9 @@ object AssistRunControlPolicy {
     /** 关闭时是否需要先完成本应用无障碍组件撤销或用户设置收尾。 */
     fun accessibilityShutdownRequired(closeRequested: Boolean): Boolean = closeRequested
 
-    /** 关闭前是否仍需要保留前台应用观察能力。 */
-    fun shouldWatchForeground(state: SessionState): Boolean = state != SessionState.CLOSED
+    /** 前台观察只在已准备会话中存在；服务空载时不参与外部应用状态。 */
+    fun shouldObserveForeground(prepared: Boolean, stopping: Boolean, overlayClosed: Boolean): Boolean =
+        prepared && !stopping && !overlayClosed
 
     /** 用户是否仍有一个未关闭的运行意图（前台保护暂停也算）。 */
     fun hasRunningIntent(
