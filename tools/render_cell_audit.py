@@ -194,12 +194,13 @@ def main():
             img = Image.open(path)
             cap = entry.get("capture") or [img.width, img.height]
             scale = img.width / float(cap[0])
+            focus_lines = []
             if args.focus_row is not None and args.focus_col is not None:
                 focus_dir = os.path.join(args.out, "focus")
                 os.makedirs(focus_dir, exist_ok=True)
                 fpath = os.path.join(focus_dir, f"{model}_r{args.focus_row}c{args.focus_col}_{name}")
                 box, size = crop_focus(img, cand["bbox"], args.focus_row, args.focus_col, scale, fpath)
-                report.append(
+                focus_lines.append(
                     f"- 局部放大 r{args.focus_row}c{args.focus_col}：`{os.path.relpath(fpath, args.out)}`"
                     f"（原图区域 {box[0]},{box[1]}-{box[2]},{box[3]}，输出 {size[0]}×{size[1]}）"
                 )
@@ -217,6 +218,7 @@ def main():
                 f"棋子数：{cand.get('piece_n')}；映射：{cand.get('mapped')}；"
                 f"红帅 {cand.get('redK')} / 黑将 {cand.get('blackK')}；标注图：`{os.path.relpath(out_png, args.out)}`（{size[0]}×{size[1]}）",
                 f"- 两候选逐格差异（{other_kind} 对照）：{'；'.join(diff) if diff else '无'}",
+                *focus_lines,
                 "", "```text", text, "```", "",
             ]
             summary["samples"].append({
