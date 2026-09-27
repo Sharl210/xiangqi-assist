@@ -140,10 +140,30 @@ def cell_diff(a, b):
     return out
 
 
+def crop_focus(img, bbox, row, col, scale, out_path, pad_cells=0.75, out_px=420):
+    """裁剪某个交叉点附近的局部放大图，供人工判断该格到底是哪个棋子。"""
+    x0, y0, x1, y1 = [v * scale for v in bbox]
+    cw = (x1 - x0) / (COLS - 1)
+    ch = (y1 - y0) / (ROWS - 1)
+    cx = x0 + cw * col
+    cy = y0 + ch * row
+    half_w = cw * (0.5 + pad_cells)
+    half_h = ch * (0.5 + pad_cells)
+    box = (max(0, int(cx - half_w)), max(0, int(cy - half_h)),
+           min(img.width, int(cx + half_w)), min(img.height, int(cy + half_h)))
+    crop = img.crop(box)
+    k = max(1.0, out_px / float(max(1, min(crop.width, crop.height))))
+    crop = crop.resize((int(crop.width * k), int(crop.height * k)), Image.LANCZOS)
+    crop.convert("RGB").save(out_path)
+    return box, crop.size
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--probe", required=True)
     ap.add_argument("--out", required=True)
+    ap.add_argument("--focus-row", type=int, default=None, help="另存该交叉点附近的局部放大图")
+    ap.add_argument("--focus-col", type=int, default=None)
     args = ap.parse_args()
 
     data = json.load(open(args.probe, encoding="utf-8"))
@@ -174,6 +194,15 @@ def main():
             img = Image.open(path)
             cap = entry.get("capture") or [img.width, img.height]
             scale = img.width / float(cap[0])
+            if args.focus_row is not None and args.focus_col is not None:
+                focus_dir = os.path.join(args.out, "focus")
+                os.makedirs(focus_dir, exist_ok=True)
+                fpath = os.path.join(focus_dir, f"{model}_r{args.focus_row}c{args.focus_col}_{name}")
+                box, size = crop_focus(img, cand["bbox"], args.focus_row, args.focus_col, scale, fpath)
+                report.append(
+                    f"- 局部放大 r{args.focus_row}c{args.focus_col}：`{os.path.relpath(fpath, args.out)}`"
+                    f"（原图区域 {box[0]},{box[1]}-{box[2]},{box[3]}，输出 {size[0]}×{size[1]}）"
+                )
             out_png = os.path.join(args.out, f"{model}_{name}")
             size = draw_board(img, cand["bbox"], cells, scale, font, out_png)
             text, count = board_text(cells)

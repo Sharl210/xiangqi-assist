@@ -431,6 +431,7 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 - [x] 逐格核对材料：新增 `tools/render_cell_audit.py`，从主机探针 JSON 生成逐样本候选棋盘文本表、两候选逐格差异与标注图；候选选取规则统一为“棋子 ROI 复核 → 同格冲突阈值复核 → 整帧映射”，三级都必须自身 `safe_geometry` 为真。输出 `docs/evidence/cell-audit/README.md`、`candidate_cells.json`（入版本库）与 20 张标注图（体积大，已就地 `.gitignore`，供人工逐格核对）。
 - [x] 统一规则后的候选统计：Medium 10/10、Lite 10/10 几何安全候选（与此前记录的口径一致）。这仍是候选，不等于逐格正确。
 - [x] 逐格材料新增“两模型候选一致性”小节：10 张中 6 张两模型候选完全一致（只需人工核对一次即覆盖两模型）；4 张各只有 1 处分歧，且分歧全部落在同一交叉点 `(2,8)`（Medium 判为红相 `B`，Lite 判为空或红炮 `C`）。该点也是“像 / 炮 类别混淆”的优先核对格，人工核对先从这 4 张的 `(2,8)` 开始即可。
+- [x] 为争议格补局部放大材料：`tools/render_cell_audit.py --focus-row 2 --focus-col 8` 输出 `docs/evidence/cell-audit/focus/`（20 张、约 2.8MB，已入版本库），人工可直接放大比对 `(2,8)`；列表见 `docs/evidence/cell-audit/README.md` 各样本条目。
 - [!] 环境事实：`/workspace/xqdk-model-venv/bin/python*` 三个入口文件为 0 字节残留，直接调用静默无输出；可用调用方式为 `PYTHONPATH=/workspace/xqdk-model-venv/lib/python3.12/site-packages /usr/bin/python3`（Pillow 12.3.0、numpy 2.2.6 可用）。未改动该 venv，避免影响其他工具。
 
 ### 远程构建与设备可安装测试包（提交 d02dc7f）
