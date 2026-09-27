@@ -432,8 +432,16 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 - [x] 统一规则后的候选统计：Medium 10/10、Lite 10/10 几何安全候选（与此前记录的口径一致）。这仍是候选，不等于逐格正确。
 - [!] 环境事实：`/workspace/xqdk-model-venv/bin/python*` 三个入口文件为 0 字节残留，直接调用静默无输出；可用调用方式为 `PYTHONPATH=/workspace/xqdk-model-venv/lib/python3.12/site-packages /usr/bin/python3`（Pillow 12.3.0、numpy 2.2.6 可用）。未改动该 venv，避免影响其他工具。
 
+### 远程构建与设备可安装测试包（提交 d02dc7f）
+- [x] 提交 `d02dc7f` 已推送 `main`；Actions run 32（push 事件，run id 36321182997）成功：JVM 单测、双变体 Release 构建、应用身份检查、产物上传全部通过；正式签名与 v1.3.3 Release 步骤按规则跳过。
+- [x] 本地复核 run 32 产物：`assets/yolov5m_xq_fp32.tflite`（sha256 前 16 位 `900e32cfbee2cd68`）、`assets/yolov5n_xq_fp16.tflite`（`d7ebc6c3d79aeaf9`）、`assets/help.html` 与源码同哈希 `60ec14fe20bf39a3…`；dex 内含新文案“已安全暂停识别，确认回到棋盘应用后会自动恢复”，不含“暂时无法确认前台应用”“样本评测”“安全门”。
+- [x] 新增 `tools/verify_apk_signer.py`（解析 APK v2 签名块取签名证书 SHA-256）。实测：run 32 构建包证书 `dc0cb72c7b0b124e…`（744 字节，CI 默认构建签名），与正式发布密钥不同，**不能覆盖安装已安装的正式签名应用**；这正是不能拿它做设备验证的原因。
+- [x] 用 `workflow_dispatch` + `sign_test_artifact=true` 对同一提交 `d02dc7f` 触发 run 33（run id 36321845245），成功：签名密钥准备、JVM 单测、双变体构建、身份检查、产物上传全部成功，正式 Release 步骤跳过（未创建或修改任何 Release/标签）。
+- [x] run 33 产物即设备可覆盖安装的 1.3.4/code 8 签名测试包（证书 `f4dbd277973ca307…`，与之前 run 27 的测试包同一把正式发布密钥）：`/workspace/dist-xqdk-actions-33/armv8-/release/XiangqiAssist_20260927_8_armv8-Release.apk`（SHA-256 `cc0484270cb86fbc0d41ebf27bdb4488a2485d93cdf552338460083df1f31132`）与 `…armv8-dotprod-Release.apk`（SHA-256 `6c01893f6ab3109ce33678e75087c823ce87db6bda4ca305ef210c7eb3435abe`）；同目录已写 `SHA256SUMS.txt`。
+
 ### 仍未完成（不得视为交付）
 - [ ] 目标设备安装新构建包复测：未点“一键准备”切应用不出现悬浮球/识别；点“一键准备”后自动落子能真正落子。
 - [ ] 复现并确认通道保险期间的瞬时断连不再中断落子事务。
 - [ ] 回传设备日志确认切出/回来自动恢复，且悬浮窗不再出现内部原因串与包名。
 - [ ] 人工基于 `docs/evidence/cell-audit/` 的 20 张标注图与 10 张原图，逐格回填真值；真值缺口未填前，Medium/Lite 只能记“几何安全候选 10/10”，不得记为逐格正确。
+- [ ] 目标设备用 run 33 的签名测试包（`/workspace/dist-xqdk-actions-33/`）覆盖安装后，按下列顺序回传证据：① 未点“一键准备”时切换多个应用 → 无悬浮球、无悬浮窗、无识别、无前台恢复；② 点“一键准备”后在棋盘应用中触发自动走子 → 真正落子成功，日志应出现 `FOREGROUND_UNAVAILABLE_GRACE`（若期间有瞬时断连）或 `FOREGROUND_RETURN_STABLE`（若确实暂停过），且不再出现 `CHANNEL_RESULT … valid=false` 打断刚建立的落子事务；③ 悬浮窗文案只出现人话状态，不出现包名或内部原因串。
