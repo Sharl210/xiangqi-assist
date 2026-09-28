@@ -16,6 +16,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import com.xiangqi.assist.R
 import com.xiangqi.assist.assist.AssistHud
+import com.xiangqi.assist.assist.AssistRunButtonPolicy
 import com.xiangqi.assist.assist.ButtonScrollAnchorPolicy
 import com.xiangqi.assist.assist.OverlayGeometry
 import kotlin.math.abs
@@ -46,9 +47,9 @@ class OverlayModel(
     val modeText: String = "自动",
     /** 自动走子开关是否开启（「自动走子」按钮点亮） */
     val autoPlay: Boolean = false,
-    /** 是否处于运行中（决定「开始/暂停」按钮文案） */
+    /** 是否处于运行中；按钮展示必须只依据这个真实运行态，不把前台暂停意图当作运行中。 */
     val running: Boolean = false,
-    /** 前台保护期间的状态提示；按钮仍由暂停快照控制。 */
+    /** 前台保护期间的内部暂停信息；只用于状态说明，不改变暂停/继续按钮的展示语义。 */
     val suspendedByForeground: Boolean = false,
     /** 本服务会话是否已真正开始过；暂停后按钮显示“继续”。 */
     val hasRunSession: Boolean = false,
@@ -283,15 +284,15 @@ class OverlayPanelView @JvmOverloads constructor(
             stageRingColor = model.ringColor
             invalidate()
         }
-        btnRun.text = when {
-            model.suspendedByForeground -> "暂停"
-            model.running -> "暂停"
-            model.hasRunSession -> "继续"
-            else -> "开始"
-        }
-        // 前台保护只是内部临时暂停，不锁死用户按钮；“暂停”仍可被用户明确点击。
+        btnRun.text = AssistRunButtonPolicy.label(
+            running = model.running,
+            hasRunSession = model.hasRunSession,
+        )
+        // 绿色只代表当前确实在运行；普通暂停、前台安全暂停和准备后待机都显示白色。
         btnRun.isEnabled = true
-        btnRun.setTextColor(if (model.running || model.suspendedByForeground) ON_COLOR else normalColor)
+        btnRun.setTextColor(
+            if (AssistRunButtonPolicy.isActive(model.running)) ON_COLOR else normalColor
+        )
         btnMySide.text = model.mySideText
         btnMySide.isEnabled = model.mySideSelectable
         btnMySide.alpha = if (model.mySideSelectable) 1f else 0.48f

@@ -6356,6 +6356,7 @@ class ScreenAssistService : Service() {
             mature = suggestMature,
             modeText = WorkModes.name(currentMode()),
             autoPlay = autoPlayOn,
+            // 面板按钮只绑定真实运行态；前台安全暂停时 paused=true，必须显示“继续”。
             running = !paused,
             suspendedByForeground = foregroundPauseSnapshot?.suspendedByForeground == true,
             hasRunSession = runSessionStarted,

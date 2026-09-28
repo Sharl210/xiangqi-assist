@@ -469,3 +469,22 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 - [x] ARMv8 / dotprod Kotlin 主源码和测试源码编译通过；logger新增会话延续、重置不中断、关闭后保留、下一次准备才清理、准备前不写入等3项测试，以及看门狗在落子事务期间让出全局恢复、自动前台暂停首次点击继续恢复等测试，在两个变体均通过。`git diff --check`通过。
 - [!] 本地 ARMv8 全量 JVM 测试仍有 8 项 Robolectric/Canvas 测试因 `UnsatisfiedLinkError` 缺少 `conscrypt_openjdk_jni-linux-aarch_64` 失败；与本次logger及看门狗策略测试无关，远程 CI 双变体验证待跑。
 - [ ] 推送后等待 GitHub Actions 双变体完整测试/构建通过；签名设备包生成后仍需目标设备重新复现卡死，并回传带 `USER_ACTION` 的完整会话日志。
+
+
+## P24 用户新增要求：最新真机日志与暂停/继续按钮状态同步
+
+### 原话与输入证据
+- [x] 本轮用户原话已逐字追加至 `request.md`。
+- [x] 最新日志目录为 `/workspace/测试log/9月29号凌晨0:14最新log/`；包含 `assist.log`（9,923行，2,042,679字节）和4张对应截图。
+
+### 最新日志初步取证
+- [x] 日志从 `SESSION|generation=1|reason=one_tap_prepare` 开始，到 `SESSION_END|reason=one_tap_close` 结束，日志生命周期没有被中途重置；共记录59次 `USER_ACTION`。
+- [x] 真机前台暂停/恢复链路有证据：4次 `FOREGROUND_OBSERVATION_PAUSE`、4次 `FOREGROUND_RESUME`，说明切换应用期间状态机确实能恢复运行意图。
+- [x] 真机末段在 `RUN_PAUSE` 后已记录 `CAPTURE_SURFACE_PAUSED`、`AUTO_TICK|PAUSED` 和暂停状态，随后关闭；当前问题主要是面板按钮仍把 `suspendedByForeground` 当成“正在运行”来显示，导致暂停态显示“暂停”并保持绿色。
+- [x] 日志末段仍有大量识别拒绝和落子核对重建：`VISION_REJECT` 784次、`PIPELINE_WATCHDOG_ACTION` 67次、`REBASE_LANDING` 62次、`LANDING_COMMIT` 51次；这些属于后续真机稳定性继续验证范围，本轮先不把它们与按钮显示问题混为同一根因。
+
+### 实施与验收清单
+- [x] 面板暂停/继续按钮只读取真实运行态：`running=true` 显示绿色“暂停”；`running=false && hasRunSession=true` 显示白色“继续”；前台安全暂停按暂停态显示“继续”，不再按运行意图显示“暂停”。
+- [x] 按钮文字和高亮判定已下沉到纯逻辑策略 `AssistRunButtonPolicy`，UI层不再自行解释 `suspendedByForeground`；运行中、普通暂停/前台暂停、准备未开始均有定向测试。
+- [x] 已复读最新日志并生成独立取证摘要，原始日志和4张截图未修改；保留会话生命周期、前台恢复和59次主动操作证据。
+- [ ] 完成远程双变体构建并生成新的正式签名测试包；设备侧仍需验证切应用/暂停/继续时显示与内部状态一致。

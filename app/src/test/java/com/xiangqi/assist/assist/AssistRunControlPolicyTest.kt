@@ -7,6 +7,15 @@ import org.junit.Test
 
 class AssistRunControlPolicyTest {
     @Test
+    fun `run button follows actual runtime state rather than foreground intent`() {
+        assertEquals("暂停", AssistRunButtonPolicy.label(running = true, hasRunSession = true))
+        assertEquals("继续", AssistRunButtonPolicy.label(running = false, hasRunSession = true))
+        assertEquals("开始", AssistRunButtonPolicy.label(running = false, hasRunSession = false))
+        assertTrue(AssistRunButtonPolicy.isActive(running = true))
+        assertFalse(AssistRunButtonPolicy.isActive(running = false))
+    }
+
+    @Test
     fun `prepared environment stays stopped until explicit start`() {
         assertTrue(AssistRunControlPolicy.PREPARED_PAUSED)
         assertFalse(
