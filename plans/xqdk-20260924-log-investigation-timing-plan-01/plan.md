@@ -504,5 +504,5 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 ### 实施与验收清单
 - [x] 定向复核策略测试通过，覆盖合法棋面、缺王和非法落点。
 - [x] Medium/Lite共用识别管线源码、双变体编译和`git diff --check`通过；相关回归测试在ARMv8 / dotprod均通过。
-- [ ] 远程Actions双变体构建成功。
+- [x] 远程Actions双变体构建成功：workflow_dispatch run 46，JVM单测、ARMv8/ dotprod Release、应用身份检查和产物上传均通过；正式签名测试APK已下载到`/workspace/dist-xqdk-actions-46/`。
 - [ ] 设备重新验证缺王、错位和落子后核对异常；未取得新日志前不得宣称识别问题完全解决。
