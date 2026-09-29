@@ -167,8 +167,11 @@ class YoloBoardDetector(
          * likely skin/low-contrast missing-piece frame. It never copies a previous board.
          */
         relaxedRecovery: Boolean = false,
+        /** 连续拒绝后的有界指数阈值降级；安全门仍由映射与棋面校验负责。 */
+        thresholdScale: Double = 1.0,
+        classMarginScale: Double = 1.0,
     ): DetectionBoardMapper.MappedBoard? = inferenceGate.runIfOpen {
-        detectInternal(frame, cropHint, anchor, exclude, relaxedRecovery)
+        detectInternal(frame, cropHint, anchor, exclude, relaxedRecovery, thresholdScale, classMarginScale)
     }
 
     /** 只有生命周期闸门持有一个在途计数时才进入这里。 */
@@ -178,6 +181,8 @@ class YoloBoardDetector(
         anchor: DetectionBoardMapper.AnchorHint?,
         exclude: IntArray?,
         relaxedRecovery: Boolean,
+        thresholdScale: Double = 1.0,
+        classMarginScale: Double = 1.0,
         allowBoardZoom: Boolean = true,
     ): DetectionBoardMapper.MappedBoard? {
         val cx0: Int; val cy0: Int; val cw: Int; val ch: Int
@@ -199,8 +204,10 @@ class YoloBoardDetector(
         val inferMs = System.currentTimeMillis() - t0
         // 正常通道保留严格阈值；只在上一帧刚被结构/漏子门拒绝后，
         // 才允许对同一帧做一次低置信度救援。旧棋面仍不参与识别或补子。
-        val confThreshold = if (relaxedRecovery) CRITICAL_RECOVERY_CONF_THRESHOLD else 0.45
-        val classMarginMin = if (relaxedRecovery) 0.02 else 0.05
+        val thresholdBase = if (relaxedRecovery) CRITICAL_RECOVERY_CONF_THRESHOLD else 0.45
+        val confThreshold = thresholdBase * thresholdScale
+        val marginBase = if (relaxedRecovery) 0.02 else 0.05
+        val classMarginMin = (marginBase * classMarginScale).coerceAtLeast(0.01)
         val dets = YoloPostprocessor.decode(
             output[0], lb, cw, ch,
             confThreshold = confThreshold,
@@ -315,6 +322,8 @@ class YoloBoardDetector(
                         anchor = anchor,
                         exclude = exclude,
                         relaxedRecovery = relaxedRecovery || needsZoomRecovery,
+                        thresholdScale = thresholdScale,
+                        classMarginScale = classMarginScale,
                     )
                     if (isBetterZoomBoard(zoomMapped, mapped)) {
                         mapped = zoomMapped
@@ -339,6 +348,8 @@ class YoloBoardDetector(
                     anchor = recovery.anchor,
                     exclude = exclude,
                     relaxedRecovery = true,
+                    thresholdScale = thresholdScale,
+                    classMarginScale = classMarginScale,
                 )
                 if (isSafeRecoveredBoard(zoomMapped) && isBetterZoomBoard(zoomMapped, mapped)) {
                     mapped = zoomMapped

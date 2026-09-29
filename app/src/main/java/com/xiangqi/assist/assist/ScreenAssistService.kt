@@ -809,6 +809,7 @@ class ScreenAssistService : Service() {
     /** 最近一次档位探测发生了自动回退或全部失败时的可读原因。 */
     @Volatile private var yoloSelectionMessage: String? = null
     @Volatile private var yoloMissStreak = 0
+    @Volatile private var thresholdRecoveryState = DetectionThresholdRecoveryPolicy.State()
     /** 裁剪推理下连续不稳定的帧数（棋盘挪动后残框自锁时回退全屏重定位） */
     @Volatile private var cropUnstableStreak = 0
     /** 本次会话 YOLO 检出的棋盘网格（用于悬浮窗遮挡判断与裁剪推理），识别失败时清空自愈 */
@@ -1521,6 +1522,10 @@ class ScreenAssistService : Service() {
         paused = AssistRunControlPolicy.PREPARED_PAUSED
         if (!resumingPreparedSession) {
             runSessionStarted = false
+            // 一键准备开启新会话时从严格基线开始；暂停、继续、前台恢复不重置，
+            // 避免把同一轮连续失败的恢复进度悄悄清零。
+            thresholdRecoveryState = DetectionThresholdRecoveryPolicy.onAccepted()
+            yoloMissStreak = 0
         }
         if (!resumingPreparedSession) {
             foregroundBaselinePackage = null
@@ -2588,14 +2593,8 @@ class ScreenAssistService : Service() {
             // 下一个125ms样本即可再次推理，不必重新等待八个样本。
             stableFrameWindow.rearm()
             val reason = lastRecognitionRejectReason ?: "稳定画面未确认"
-            trace("VISION_REJECT", "reason=$reason epoch=$epoch phase=${refreshPhase()} misses=${yoloMissStreak + 1}")
+            recordVisionReject(reason, epoch)
             streamAnomalyStreak++
-            yoloMissStreak++
-            lastFailReason = reason
-            if (streamAnomalyStreak >= STREAM_ANOMALY_GRID_RESET_MISSES) {
-                sessionGrid = null
-                lastFullVisionCheckAt = 0L
-            }
             if (refresh.isActive) refresh.consumeAttempt(lastFailReason)
             if (yoloMissStreak == 1 || yoloMissStreak % 4 == 0) {
                 setStatus("正在确认棋面…")
@@ -2645,14 +2644,9 @@ class ScreenAssistService : Service() {
         }
         if (unsafe != null) {
             stableFrameWindow.rearm()
-            trace("VISION_REJECT", "reason=$unsafe epoch=$epoch")
             streamAnomalyStreak++
-            yoloMissStreak++
+            recordVisionReject(unsafe, epoch)
             lastFailReason = unsafe
-            if (streamAnomalyStreak >= STREAM_ANOMALY_GRID_RESET_MISSES) {
-                sessionGrid = null
-                lastFullVisionCheckAt = 0L
-            }
             if (refresh.isActive) refresh.consumeAttempt(unsafe)
             setStatus("正在确认棋面…")
             kickCapture()
@@ -2660,7 +2654,7 @@ class ScreenAssistService : Service() {
         }
 
         streamAnomalyStreak = 0
-        yoloMissStreak = 0
+        resetVisionRecoveryAfterAccepted()
         lastSeen = SeenBoard(canonical, frame.capturedAt)
         sessionGrid = mapped.grid
         lastMappedAt = System.currentTimeMillis()
@@ -2896,8 +2890,7 @@ class ScreenAssistService : Service() {
                 )
                 tracker.reset(landingRebaseRedGo)
                 stableFrameWindow.rearm()
-                lastFailReason = reason
-                yoloMissStreak = maxOf(yoloMissStreak, 1)
+                recordVisionReject(reason)
                 setStatus("棋面无法与落子核对快照对应：$reason\n拒绝当前结果，继续重新识别…")
                 kickCapture()
                 requestWatchdog()
@@ -2917,8 +2910,7 @@ class ScreenAssistService : Service() {
                 trace("AUTO_SIDE_REJECT", "reason=$reason redKings/blackKings=invalid epoch=$epoch")
                 tracker.reset(currentRedGo)
                 stableFrameWindow.rearm()
-                lastFailReason = reason
-                yoloMissStreak = maxOf(yoloMissStreak, 1)
+                recordVisionReject(reason, epoch)
                 setStatus("当前画面未确认，正在重新识别…")
                 kickCapture()
                 requestWatchdog()
@@ -2944,8 +2936,7 @@ class ScreenAssistService : Service() {
                 // 不把旧棋面复制回候选，也不以旧棋面补齐缺失棋子。
                 tracker.reset(currentRedGo)
                 stableFrameWindow.rearm()
-                lastFailReason = unsafe
-                yoloMissStreak = maxOf(yoloMissStreak, 1)
+                recordVisionReject(unsafe, epoch)
                 setStatus("当前画面未确认，正在重新识别…")
                 kickCapture()
                 requestWatchdog()
@@ -4743,6 +4734,7 @@ class ScreenAssistService : Service() {
         autoLastUcci = null
         autoFenAtExec = null
         yoloMissStreak = 0
+        thresholdRecoveryState = DetectionThresholdRecoveryPolicy.onAccepted()
         cropUnstableStreak = 0
         lastMappedAt = 0L
         lastMapAtForWatchdog = -1L
@@ -6020,18 +6012,57 @@ class ScreenAssistService : Service() {
         }
     }
 
-    /** Reject the unsafe position, preserve its reason, and immediately request a paced next sample. */
+    /** 统一登记一次识别拒绝；阈值降级只在每第十次发生，并触发下一轮整屏重定位。 */
+    private fun recordVisionReject(reason: String, epoch: Long? = null) {
+        yoloMissStreak++
+        lastFailReason = reason
+        thresholdRecoveryState = DetectionThresholdRecoveryPolicy.onRejected(thresholdRecoveryState)
+        trace(
+            "VISION_REJECT",
+            "reason=$reason epoch=${epoch ?: recognitionEpoch} phase=${refreshPhase()} " +
+                "misses=${thresholdRecoveryState.misses} level=${thresholdRecoveryState.level}",
+        )
+        if (thresholdRecoveryState.misses % DetectionThresholdRecoveryPolicy.MISSES_PER_STEP == 0) {
+            sessionGrid = null
+            cropUnstableStreak = 0
+            lastFullVisionCheckAt = 0L
+            trace(
+                "VISION_THRESHOLD_STEP",
+                "misses=${thresholdRecoveryState.misses} level=${thresholdRecoveryState.level} " +
+                    "conf=${DetectionThresholdRecoveryPolicy.threshold(thresholdRecoveryState)} " +
+                    "margin=${DetectionThresholdRecoveryPolicy.margin(thresholdRecoveryState)} fullScan=true",
+            )
+        } else if (streamAnomalyStreak >= STREAM_ANOMALY_GRID_RESET_MISSES) {
+            sessionGrid = null
+            lastFullVisionCheckAt = 0L
+        }
+    }
+
+    /** 成功发布合法棋面后回到严格检测基线。 */
+    private fun resetVisionRecoveryAfterAccepted() {
+        if (thresholdRecoveryState.misses > 0) {
+            trace(
+                "VISION_THRESHOLD_RESET",
+                "previousMisses=${thresholdRecoveryState.misses} previousLevel=${thresholdRecoveryState.level}",
+            )
+            thresholdRecoveryState = DetectionThresholdRecoveryPolicy.onAccepted()
+        }
+        yoloMissStreak = 0
+    }
+
+    /** Reject an unsafe position and request a paced next sample. */
     private fun notifyBoardProblem(reason: String) {
         if (paused || manualMode || overlayClosed) {
             setStatus("棋面不合法：$reason")
             return
         }
-        yoloMissStreak = maxOf(yoloMissStreak, 1)
-        lastFailReason = reason
+        streamAnomalyStreak++
+        recordVisionReject(reason)
         setStatus("当前画面未确认，正在重新识别…")
         kickCapture()
         requestWatchdog()
     }
+
 
     /**
      * 落子前给悬浮窗"让路"。
@@ -6191,6 +6222,7 @@ class ScreenAssistService : Service() {
         yolo: YoloBoardDetector,
         excluded: IntArray?,
         relaxedRecovery: Boolean = false,
+        thresholdState: DetectionThresholdRecoveryPolicy.State = thresholdRecoveryState,
     ): DetectionBoardMapper.MappedBoard? {
         val grid = sessionGrid
         val region = config.boardRegion?.let { BoardRegionGeometry.fromArray(it) }
@@ -6211,10 +6243,16 @@ class ScreenAssistService : Service() {
         val result = if (fullDue) {
             lastFullVisionCheckAt = now
             // 本次稳定关键帧只执行一次整屏/框选范围推理；下一次样本再切换到裁剪定位。
-            yolo.detect(frame, regionCrop, null, excluded, relaxedRecovery)
+            yolo.detect(frame, regionCrop, null, excluded, relaxedRecovery,
+                thresholdScale = DetectionThresholdRecoveryPolicy.threshold(thresholdState) /
+                    DetectionThresholdRecoveryPolicy.BASE_THRESHOLD,
+                classMarginScale = DetectionThresholdRecoveryPolicy.margin(thresholdState) / 0.05)
         } else {
             // 已有网格时只执行一次裁剪推理；锚点仅提供几何基准，不替换当前类别。
-            yolo.detect(frame, crop, anchor, excluded, relaxedRecovery)
+            yolo.detect(frame, crop, anchor, excluded, relaxedRecovery,
+                thresholdScale = DetectionThresholdRecoveryPolicy.threshold(thresholdState) /
+                    DetectionThresholdRecoveryPolicy.BASE_THRESHOLD,
+                classMarginScale = DetectionThresholdRecoveryPolicy.margin(thresholdState) / 0.05)
         }
         trace(
             "VISION_RAW",
