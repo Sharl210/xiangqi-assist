@@ -74,3 +74,5 @@ java.lang.NullPointerException: Attempt to invoke virtual method 'int android.vi
 
 
 日志里面有识别异常问题你修
+
+看最新的测试log，还有你开发你交付结果的时候，首先要把我们的整个测试log的所有就是里面所有的这些我截下来的失败的图片都保证能过，我算是你交付成功，不是说你说两句做了什么，就算是能那个了了。

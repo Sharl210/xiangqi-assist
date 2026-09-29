@@ -1235,6 +1235,8 @@ class ScreenAssistService : Service() {
     @Volatile private var landingRebasePreBoard: Array<IntArray>? = null
     @Volatile private var landingRebaseExpectedBoard: Array<IntArray>? = null
     @Volatile private var landingRebaseRedGo = true
+    @Volatile private var landingRebaseFallbackState = LandingRebaseFallbackPolicy.State()
+    @Volatile private var landingRebaseFallbackAccepted = false
     /** 这一轮是否已经开始运行；日志从成功一键准备时启动，暂停、重置和继续均不换日志。 */
     @Volatile private var runSessionStarted = false
 
@@ -2480,6 +2482,20 @@ class ScreenAssistService : Service() {
                 preRedGo = landingRebaseRedGo,
             )
             if (!resolution.accepted) {
+                // 快照可能已经落后于真实棋局。连续三次看到同一张、且对任一合法轮次
+                // 都安全的棋面后，解除旧快照门并建立新观察基线，避免永久卡在重建状态。
+                val fallback = LandingRebaseFallbackPolicy.observe(
+                    state = landingRebaseFallbackState,
+                    observed = canonical,
+                    preRedGo = landingRebaseRedGo,
+                )
+                landingRebaseFallbackState = fallback.state
+                if (fallback.accepted) {
+                    landingRebaseFallbackAccepted = true
+                    val before = AssistBoard.engineUnsafeReason(canonical, landingRebaseRedGo)
+                    val after = AssistBoard.engineUnsafeReason(canonical, !landingRebaseRedGo)
+                    return if (before == null) null else after
+                }
                 return "落子核对后的棋面与落子前/预期局面及一步合法应手均不匹配"
             }
             return AssistBoard.engineUnsafeReason(canonical, resolution.redGo!!)
@@ -2619,8 +2635,15 @@ class ScreenAssistService : Service() {
                 unsafe = null
             }
         }
+        if (unsafe == null && landingRebaseFallbackAccepted) {
+            trace("LANDING_REBASE_FALLBACK", "streak=${landingRebaseFallbackState.streak} accepted=true")
+            landingRebasePending = false
+            landingRebasePreBoard = null
+            landingRebaseExpectedBoard = null
+            landingRebaseFallbackState = LandingRebaseFallbackPolicy.State()
+            landingRebaseFallbackAccepted = false
+        }
         if (unsafe != null) {
-            // 当前关键帧被结构/缺子门拒绝；滑动窗口不清空，下一张相邻样本直接重试。
             stableFrameWindow.rearm()
             trace("VISION_REJECT", "reason=$unsafe epoch=$epoch")
             streamAnomalyStreak++
@@ -4715,6 +4738,8 @@ class ScreenAssistService : Service() {
         landingRebasePending = false
         landingRebasePreBoard = null
         landingRebaseExpectedBoard = null
+        landingRebaseFallbackState = LandingRebaseFallbackPolicy.State()
+        landingRebaseFallbackAccepted = false
         autoLastUcci = null
         autoFenAtExec = null
         yoloMissStreak = 0
@@ -5462,6 +5487,8 @@ class ScreenAssistService : Service() {
             landingRebasePreBoard = AssistBoard.clone(abandoned.preBoard)
             landingRebaseExpectedBoard = abandoned.expectedPostBoard?.let { AssistBoard.clone(it) }
             landingRebaseRedGo = abandoned.preRedGo
+            landingRebaseFallbackState = LandingRebaseFallbackPolicy.State()
+            landingRebaseFallbackAccepted = false
         }
         clearLandingTransaction(restoreWindow = true)
         stopCurrentSearch()
