@@ -264,13 +264,20 @@ class YoloBoardDetector(
             }
         }
 
-        // 缺王/无棋面时可进行一次低置信度救援；所有候选仍须通过双王、冲突、棋面结构安全门。
-        if ((mapped == null || !hasBothKings(mapped.canonical) || relaxedRecovery) &&
+        // 缺王、非法落点、数量异常或同格冲突都进入一次定向复核；
+        // 复核只提供额外观测机会，最终仍必须通过双王、位置和结构安全门。
+        val needsTargetedRecovery = DetectionRecoveryPolicy.needsTargetedRecovery(mapped)
+        if (needsTargetedRecovery) {
+            lastDetectionSummary = "targeted-recovery-needed;$lastDetectionSummary"
+        }
+
+        // 缺王/无棋面/非法落点时可进行一次低置信度救援；所有候选仍须通过双王、冲突、棋面结构安全门。
+        if ((mapped == null || needsTargetedRecovery || relaxedRecovery) &&
             mapped?.cellClassConflicts.isNullOrEmpty()
         ) {
             val rescue = YoloPostprocessor.decode(
                 output[0], lb, cw, ch,
-                confThreshold = if (relaxedRecovery) 0.24 else CRITICAL_RECOVERY_CONF_THRESHOLD,
+                confThreshold = if (relaxedRecovery || needsTargetedRecovery) 0.24 else CRITICAL_RECOVERY_CONF_THRESHOLD,
                 aspectMin = 0.50,
                 aspectMax = 1.60,
                 sizeMinFactor = 0.40,
@@ -297,9 +304,9 @@ class YoloBoardDetector(
         // 只在结果更完整且没有类别冲突时替换第一遍，绝不凭历史棋面补子。
         if (allowBoardZoom && cropHint == null) {
             val board = shifted.filter { it.isBoard }.maxByOrNull { it.score }
-            if (board != null && (mapped == null || mapped.pieceCount < BOARD_ZOOM_MIN_PIECES ||
-                    !hasBothKings(mapped.canonical) || mapped.cellClassConflicts.isNotEmpty())
-            ) {
+            val needsZoomRecovery = DetectionRecoveryPolicy.needsTargetedRecovery(mapped) ||
+                mapped?.pieceCount?.let { it < BOARD_ZOOM_MIN_PIECES } == true
+            if (board != null && needsZoomRecovery) {
                 val zoom = boardZoomHint(board, frame.width, frame.height)
                 if (zoom != null) {
                     val zoomMapped = detectInternal(
@@ -307,8 +314,7 @@ class YoloBoardDetector(
                         cropHint = zoom,
                         anchor = anchor,
                         exclude = exclude,
-                        relaxedRecovery = relaxedRecovery,
-                        allowBoardZoom = false,
+                        relaxedRecovery = relaxedRecovery || needsZoomRecovery,
                     )
                     if (isBetterZoomBoard(zoomMapped, mapped)) {
                         mapped = zoomMapped
@@ -322,7 +328,7 @@ class YoloBoardDetector(
         // 棋盘类别漏检时，若当前帧的棋子中心已形成可靠包围盒格网，基于该格网做一次安全放大复核。
         // 该候选不直接提交；只有二次推理得到双王、无同格冲突且结构合法的棋面才可替换。
         if (allowBoardZoom && cropHint == null && shifted.none { it.isBoard } &&
-            (mapped == null || !isSafeRecoveredBoard(mapped))
+            DetectionRecoveryPolicy.needsTargetedRecovery(mapped)
         ) {
             val recovery = DetectionRecoveryCropPolicy.fromPieceBoundingGrid(mapped, frame.width, frame.height)
                 ?: DetectionRecoveryCropPolicy.fromPieceDetections(shifted, frame.width, frame.height)
@@ -332,8 +338,7 @@ class YoloBoardDetector(
                     cropHint = recovery.rect,
                     anchor = recovery.anchor,
                     exclude = exclude,
-                    relaxedRecovery = relaxedRecovery,
-                    allowBoardZoom = false,
+                    relaxedRecovery = true,
                 )
                 if (isSafeRecoveredBoard(zoomMapped) && isBetterZoomBoard(zoomMapped, mapped)) {
                     mapped = zoomMapped

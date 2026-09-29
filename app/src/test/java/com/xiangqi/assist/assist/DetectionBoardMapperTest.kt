@@ -2,6 +2,7 @@ package com.xiangqi.assist.assist
 
 import com.xiangqi.assist.gamelogic.Piece
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -103,6 +104,28 @@ class DetectionBoardMapperTest {
         assertEquals(Piece.WMA, conflict.secondPiece)
     }
 
+    @Test
+    fun `targeted recovery is requested for missing king and illegal placement but not valid board`() {
+        val valid = DetectionBoardMapper.MappedBoard(
+            screenRaw = AssistBoard.canonicalStart(),
+            canonical = AssistBoard.canonicalStart(),
+            orientation = Orientation.STANDARD,
+            grid = null,
+            pieceCount = 32,
+            avgScore = 0.9,
+            dropped = 0,
+            anchorSource = DetectionBoardMapper.AnchorSource.BOARD_BOX,
+        )
+        assertFalse(DetectionRecoveryPolicy.needsTargetedRecovery(valid))
+
+        val missingKing = AssistBoard.canonicalStart().also { it[0][4] = Piece.EMPTY }
+        val missing = valid.copyForTest(canonical = missingKing, screenRaw = missingKing, pieceCount = 31)
+        assertTrue(DetectionRecoveryPolicy.needsTargetedRecovery(missing))
+
+        val illegal = AssistBoard.canonicalStart().also { it[0][4] = Piece.BJIANG; it[0][3] = Piece.BXIANG }
+        val invalid = valid.copyForTest(canonical = illegal, screenRaw = illegal)
+        assertTrue(DetectionRecoveryPolicy.needsTargetedRecovery(invalid))
+    }
     @Test
     fun `board frame is refined from piece centers when background frame is offset`() {
         val pieces = listOf(
