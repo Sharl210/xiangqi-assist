@@ -591,3 +591,35 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 - [ ] 待用户回话：两条新候选是否上正式库；密钥是否入箱。
 - [x] 本轮顺带清理：读取正式库时发现 `AB2-C-075` 保存了两个 GitHub 令牌明文，已按凭据引用规则改写为保险箱条目引用并按命名规范改名为 `C-20260929T231702-a95dcf27`，全库引用同步；明文令牌在两库中已为 0。
 
+
+## P30 用户新增要求：走子方判定错误与全量截图验收（2026-09-29 晚）
+
+### 原话与输入证据
+- [x] 用户原话已逐字追加进 `request.md`（走子方判定 + 测试 log 全量截图双模型验收）。
+- [x] 最新测试目录已定位：`/workspace/测试log/9.29晚上11:37/`（13 张截图 + assist.log，10,650 行）。
+- [x] 该日志统计：`VISION_REJECT` 452 次、`VISION_THRESHOLD_STEP` 36 次、`VISION_THRESHOLD_RESET` 29 次、`LANDING_REBASE` 103 次、`LANDING_COMMIT` 74 次、`USER_ACTION` 15 次；首次观察到阶梯降档与复位真实落盘，说明上一轮修复在真机生效。
+
+### 实施与验收清单
+- [x] 新增 `TurnInferencePolicy.kt`：只有“差分恰好构成一步规则合法着法”才切换走子方；解释不了的变化（多子变化、动画残影、识别抖动、连场换局）不再把回合推给对方；自动模式下我方着法必须由落子事务/落子回执背书（`OUR_LANDING_BACKING_MS=2500ms`）。
+- [x] 新增 `TurnInferencePolicyTest.kt`；替换 `ScreenAssistService.onBoardConfirmed` 的旧差分推断，并保留 `TURN_INFERENCE` 诊断日志。
+- [x] 新增全量截图离线验收探针 `tools/verify_test_log_screenshots.py` 与报告 `docs/evidence/test-log-screenshot-acceptance.json`。
+- [x] 主机复现结果：55 张截图 Medium 55/55 通过、Lite 55/55 通过（同一恢复链：整屏 → 冲突复核 0.47 → 阶梯阈值 → 棋盘框放大 → 低阈值救援 0.24 → 棋子包围盒放大）。
+- [ ] 真机逐张复测（依赖用户设备操作）。
+
+## P31 用户新增要求：逐帧执子方检测、等待间隔减半、降级改三次（2026-09-29 深夜）
+
+### 原话与输入证据
+- [x] 用户原话已逐字追加进 `request.md`。
+- [x] 连场比赛会换边：下完一盘立刻开下一盘，我方可能从红方变黑方，必须逐帧重新检测。
+
+### 实施与验收清单
+- [x] 新增 `SideDetectionStabilityPolicy.kt`：自动模式每帧检测屏幕下半区帅/将，连续 3 帧一致才换边；单帧抖动不翻转整局方向；读不出唯一王时沿用已确认值，不清空进度。
+- [x] `ScreenAssistService`：自动模式逐帧检测并写入 `SIDE_OBSERVE`/`AUTO_SIDE_DETECTED` 诊断；手动模式完全不检测，只用用户指定的执子方。
+- [x] `HeartbeatPolicy`：等待阶段扫描超时与冷却 250ms → 125ms；`AssistPhase.MIN_FRAME_INTERVAL_MS` 150ms → 75ms。采样时钟保持 8fps，不翻倍，避免功耗反向升高。
+- [x] `DetectionThresholdRecoveryPolicy.MISSES_PER_STEP` 10 → 3，指数下降与成功后复位不变；相关单测同步更新。
+- [x] `YoloBoardDetector` 的同格冲突复核由“仅 Lite”扩展为两档共用（0.47 / 棋盘 0.20）。
+- [x] 本机验证：资源编译、`testArmv8-DebugUnitTest`（456 项，8 项为环境缺 Robolectric 图形库）、双变体 Release 打包均成功。
+- [x] 产物：`/workspace/dist-xqdk-local-20260929-r2/`，两个 APK 的 APK v2 签名证书 SHA-256 均为 `f4dbd277973ca30798b84109735c2bc976afd177f87d361bc95574e781372dee`（与已发布正式版一致，可覆盖安装）。
+- [x] 建立验收文档 `plans/xqdk-20260924-log-investigation-timing-plan-01/acceptance.md`（第 1 轮），逐条列 30 条原始需求与状态。
+- [ ] 设备复测：回合不再判反、逐帧换边、等待响应变快、卡死自恢复、功耗实测。
+- [ ] 功耗优化（R-23）尚未开始，计划闭环未 PASS，不得交付。
