@@ -2,9 +2,10 @@ package com.xiangqi.assist.assist
 
 /** Scan fallback policy for continuous reading phases. */
 object HeartbeatPolicy {
-    const val WAITING_SCAN_TIMEOUT_MS = 250L
+    /** 等待对方落子时的扫描间隔；用户要求比原先缩短一倍，以便更快发现棋面变化。 */
+    const val WAITING_SCAN_TIMEOUT_MS = 125L
     const val OTHER_SCAN_TIMEOUT_MS = 500L
-    const val FORCE_SCAN_COOLDOWN_MS = 250L
+    const val FORCE_SCAN_COOLDOWN_MS = 125L
     const val OTHER_SCAN_COOLDOWN_MS = 500L
 
     data class State(

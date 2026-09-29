@@ -7,14 +7,15 @@ import org.junit.Test
 
 class HeartbeatPolicyTest {
     @Test fun `waiting stage timeout and cooldown are halved`() {
-        assertEquals(250L, HeartbeatPolicy.WAITING_SCAN_TIMEOUT_MS)
-        assertEquals(250L, HeartbeatPolicy.FORCE_SCAN_COOLDOWN_MS)
+        // 用户要求：等待对方落子时的检测间隔比原先缩短一倍。
+        assertEquals(125L, HeartbeatPolicy.WAITING_SCAN_TIMEOUT_MS)
+        assertEquals(125L, HeartbeatPolicy.FORCE_SCAN_COOLDOWN_MS)
         val state = HeartbeatPolicy.State(lastSuccessfulScanAt = 10_000L)
-        assertFalse(HeartbeatPolicy.shouldForceWaitingScan(AssistPhase.Phase.WAITING, 10_249L, state))
-        assertTrue(HeartbeatPolicy.shouldForceWaitingScan(AssistPhase.Phase.WAITING, 10_250L, state))
-        val after = HeartbeatPolicy.afterForce(10_250L, state)
-        assertFalse(HeartbeatPolicy.shouldForceWaitingScan(AssistPhase.Phase.WAITING, 10_499L, after))
-        assertTrue(HeartbeatPolicy.shouldForceWaitingScan(AssistPhase.Phase.WAITING, 10_500L, after))
+        assertFalse(HeartbeatPolicy.shouldForceWaitingScan(AssistPhase.Phase.WAITING, 10_124L, state))
+        assertTrue(HeartbeatPolicy.shouldForceWaitingScan(AssistPhase.Phase.WAITING, 10_125L, state))
+        val after = HeartbeatPolicy.afterForce(10_125L, state)
+        assertFalse(HeartbeatPolicy.shouldForceWaitingScan(AssistPhase.Phase.WAITING, 10_249L, after))
+        assertTrue(HeartbeatPolicy.shouldForceWaitingScan(AssistPhase.Phase.WAITING, 10_250L, after))
     }
 
     @Test fun `other recognition phases timeout and cooldown are halved`() {
@@ -41,7 +42,7 @@ class HeartbeatPolicyTest {
     @Test fun `processed sample postpones heartbeat even when board was rejected`() {
         val after = HeartbeatPolicy.afterSuccessfulScan(30_000L,
             HeartbeatPolicy.State(lastSuccessfulScanAt = 10_000L))
-        assertFalse(HeartbeatPolicy.shouldForceWaitingScan(AssistPhase.Phase.WAITING, 30_249L, after))
-        assertTrue(HeartbeatPolicy.shouldForceWaitingScan(AssistPhase.Phase.WAITING, 30_250L, after))
+        assertFalse(HeartbeatPolicy.shouldForceWaitingScan(AssistPhase.Phase.WAITING, 30_124L, after))
+        assertTrue(HeartbeatPolicy.shouldForceWaitingScan(AssistPhase.Phase.WAITING, 30_125L, after))
     }
 }

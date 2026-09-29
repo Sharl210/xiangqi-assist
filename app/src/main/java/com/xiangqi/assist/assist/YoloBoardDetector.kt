@@ -241,21 +241,22 @@ class YoloBoardDetector(
         }
         var criticalRecoveryUsed = false
 
-        // Lite同格冲突时只做一次轻微的阈值复核。当前样本扫描显示0.47可剔除低分冲突框；
-        // 复核必须保留完全相同的棋盘格子与棋子数、通过双王/合法棋面门，且冲突清零，
-        // 才能接受。只要棋面发生任何变化，仍拒绝并保留原冲突结果。
-        if (modelTier == YoloModelTier.LITE && mapped?.cellClassConflicts?.isNotEmpty() == true) {
+        // 同格冲突时做一次轻微的阈值复核（0.47 / 棋盘 0.20），两档模型都执行：
+        // 真机日志里同格冲突长期是最多的拒绝原因，冲突帧里通常只有一两个低分框落错类别，
+        // 略提阈值即可剔除。复核必须保留完全相同的棋盘格子与棋子数、通过双王与合法棋面门，
+        // 且冲突清零，才能接受；只要棋面发生任何变化，仍拒绝并保留原冲突结果。
+        if (mapped?.cellClassConflicts?.isNotEmpty() == true) {
             val baseline = mapped!!
             val baselinePieceCount = baseline.pieceCount
             val conservativeDetections = YoloPostprocessor.decode(
                 output[0], lb, cw, ch,
-                confThreshold = LITE_CONFLICT_RECOVERY_CONF_THRESHOLD,
+                confThreshold = CONFLICT_RECOVERY_CONF_THRESHOLD,
                 aspectMin = 0.50,
                 aspectMax = 1.60,
                 sizeMinFactor = 0.40,
                 sizeMaxFactor = 2.00,
                 classMarginMin = 0.05,
-                boardConfThreshold = LITE_RECOVERY_BOARD_CONF_THRESHOLD,
+                boardConfThreshold = RECOVERY_BOARD_CONF_THRESHOLD,
             )
             val conservativeMapped = DetectionBoardMapper.map(
                 excludeDetections(shiftToFrame(conservativeDetections, cx0, cy0), exclude),
@@ -267,7 +268,7 @@ class YoloBoardDetector(
                 AssistBoard.equal(baseline.canonical, conservativeMapped.canonical)
             ) {
                 mapped = conservativeMapped
-                lastDetectionSummary = "lite-conflict-recovery=0.47;$lastDetectionSummary"
+                lastDetectionSummary = "conflict-recovery=0.47;$lastDetectionSummary"
             }
         }
 
@@ -529,10 +530,10 @@ class YoloBoardDetector(
         private fun expectedOutputShape(): IntArray =
             intArrayOf(1, YoloPostprocessor.ANCHORS, YoloPostprocessor.DIMS)
 
-        /** Lite同格冲突复核允许低置信棋盘框，棋子框使用冲突复核阈值0.47。 */
-        private const val LITE_RECOVERY_BOARD_CONF_THRESHOLD = 0.20
-        /** Lite同格冲突复核阈值；同格冲突成立时才用于重新解码一次。 */
-        private const val LITE_CONFLICT_RECOVERY_CONF_THRESHOLD = 0.47
+        /** 同格冲突复核允许低置信棋盘框，棋子框使用冲突复核阈值0.47。 */
+        private const val RECOVERY_BOARD_CONF_THRESHOLD = 0.20
+        /** 同格冲突复核阈值；同格冲突成立时才用于重新解码一次（两档模型共用）。 */
+        private const val CONFLICT_RECOVERY_CONF_THRESHOLD = 0.47
         /** 关键棋子救援只降低置信度门槛，不改变正常帧的严格门槛。 */
         private const val CRITICAL_RECOVERY_CONF_THRESHOLD = 0.30
         /** 整屏推理少于该数量且已有 board 框时，触发一次 board ROI 放大复核。 */

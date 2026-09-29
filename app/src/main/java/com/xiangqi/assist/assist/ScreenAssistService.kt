@@ -142,6 +142,12 @@ class ScreenAssistService : Service() {
         /** 内部通道恢复线程的硬超时；超时必须释放状态机，不能等用户暂停。 */
         private const val CHANNEL_RESTART_TIMEOUT_MS = 12_000L
 
+        /**
+         * 落子提交后仍视为“我方着法在途”的时长。这段时间内检测到我方走子才算我方落子，
+         * 否则自动模式下这种单帧差分只能是识别抖动，不得切换回合。
+         */
+        private const val OUR_LANDING_BACKING_MS = 2_500L
+
         /** 每隔一段时间用整屏模型独立复核，防止局部裁剪在棋盘移动后自锁。 */
         private const val FULL_VISION_RECHECK_MS = 1800L
         /** 连续录屏输出的最长边；模型只需640输入，降低全屏拷贝和内存压力。 */
@@ -1243,6 +1249,12 @@ class ScreenAssistService : Service() {
 
     /** 当前落子事务；为空就绝不允许显示“落子中/核对中”。 */
     @Volatile private var landingState: LandingFlow.State? = null
+
+    /** 自动执子方的逐帧检测状态：连续多帧一致才换边，避免单帧抖动翻转整局方向。 */
+    private var sideStabilityState = SideDetectionStabilityPolicy.State()
+
+    /** 最近一次我方落子提交时刻；用于判定“我方着法在途”，把识别抖动与真实落子区分开。 */
+    @Volatile private var lastOurLandingAt = 0L
     @Volatile private var landingToken = 0L
 
     /** 落子期间是否已让悬浮窗"让路"（收起面板 + 不可触摸） */
@@ -2842,6 +2854,7 @@ class ScreenAssistService : Service() {
             "LANDING_COMMIT",
             "token=${landing.token} verdict=$verdict oldFen=$oldFen newFen=$fen redGo=$redGo"
         )
+        lastOurLandingAt = System.currentTimeMillis()
         clearLandingTransaction(restoreWindow = true)
         autoMoveAttempts = 0
         autoMoveCount++
@@ -2897,29 +2910,67 @@ class ScreenAssistService : Service() {
                 return@post
             }
 
-            // 自动模式只看屏幕下半区的帅/将。它们必须唯一且恰有一个在下半区；
-            // 缺失或歧义属于坏棋面，复用异常棋面重识别流程，绝不回退猜手动颜色。
-            val detectedAutoSide = if (config.sideSelectionMode == SideSelectionMode.AUTO) {
+            // 自动模式：**每一帧**都重新检测我方执子方（连场对局下完一盘立刻开下一盘会换边）。
+            // 手动模式完全不检测，一律依赖用户手动指定的执子方。
+            // 换边必须连续若干帧一致才生效，单帧抖动不得翻转整局方向。
+            val sideMode = config.sideSelectionMode
+            val detectedAutoSide = if (sideMode == SideSelectionMode.AUTO) {
                 SideSelectionPolicy.detectAutoSideRed(confirmed.screenRaw)
             } else {
                 null
             }
-            if (config.sideSelectionMode == SideSelectionMode.AUTO && detectedAutoSide == null) {
-                autoSideDetectionReady = false
-                val reason = "屏幕下半区无法唯一确认帅/将，棋面异常"
-                trace("AUTO_SIDE_REJECT", "reason=$reason redKings/blackKings=invalid epoch=$epoch")
-                tracker.reset(currentRedGo)
-                stableFrameWindow.rearm()
-                recordVisionReject(reason, epoch)
-                setStatus("当前画面未确认，正在重新识别…")
-                kickCapture()
-                requestWatchdog()
-                return@post
+            if (sideMode == SideSelectionMode.AUTO) {
+                if (detectedAutoSide == null && !autoSideDetectionReady) {
+                    // 从未确认过执子方又读不出唯一王：属于坏棋面，复用异常棋面重识别流程。
+                    val reason = "屏幕下半区无法唯一确认帅/将，棋面异常"
+                    trace("AUTO_SIDE_REJECT", "reason=$reason redKings/blackKings=invalid epoch=$epoch")
+                    tracker.reset(currentRedGo)
+                    stableFrameWindow.rearm()
+                    recordVisionReject(reason, epoch)
+                    setStatus("当前画面未确认，正在重新识别…")
+                    kickCapture()
+                    requestWatchdog()
+                    return@post
+                }
+                val sideDecision = SideDetectionStabilityPolicy.observe(
+                    state = sideStabilityState,
+                    detected = detectedAutoSide,
+                    current = config.autoSideRed,
+                )
+                sideStabilityState = sideDecision.state
+                when {
+                    !sideDecision.observed -> {
+                        // 已确认过的执子方沿用旧值继续识别，不因单帧读不出王让整盘停摆。
+                        autoSideDetectionReady = true
+                        trace("SIDE_OBSERVE", "mode=AUTO detected=null kept=${config.autoSideRed}")
+                    }
+                    sideDecision.changed -> {
+                        val previousSide = config.autoSideRed
+                        config.autoSideRed = sideDecision.red!!
+                        autoSideDetectionReady = true
+                        trace(
+                            "AUTO_SIDE_DETECTED",
+                            "red=${sideDecision.red} source=screen-bottom-king previous=$previousSide " +
+                                "frames=${SideDetectionStabilityPolicy.REQUIRED_CONSECUTIVE_FRAMES}",
+                        )
+                        stopCurrentSearch()
+                        resetSuggestionState(newAnalysisCycle = true)
+                        setStatus("按屏幕下半区帅/将识别，自动己方为${if (sideDecision.red) "红方" else "黑方"}")
+                    }
+                    else -> {
+                        autoSideDetectionReady = true
+                        trace(
+                            "SIDE_OBSERVE",
+                            "mode=AUTO detected=$detectedAutoSide kept=${config.autoSideRed} " +
+                                "streak=${sideDecision.state.streak}",
+                        )
+                    }
+                }
             }
 
-            val sideForInitialTurn = when (config.sideSelectionMode) {
+            val sideForInitialTurn = when (sideMode) {
                 SideSelectionMode.MANUAL -> config.mySideRed
-                SideSelectionMode.AUTO -> detectedAutoSide!!
+                SideSelectionMode.AUTO -> config.autoSideRed
             }
             var confirmedRedGo = when {
                 isLandingRebase -> rebaseResolution!!.redGo!!
@@ -2941,18 +2992,6 @@ class ScreenAssistService : Service() {
                 kickCapture()
                 requestWatchdog()
                 return@post
-            }
-
-            val autoSideChanged = detectedAutoSide != null && config.autoSideRed != detectedAutoSide
-            if (detectedAutoSide != null) {
-                if (autoSideChanged) config.autoSideRed = detectedAutoSide
-                autoSideDetectionReady = true
-                if (autoSideChanged) {
-                    trace("AUTO_SIDE_DETECTED", "red=$detectedAutoSide source=screen-bottom-king")
-                    stopCurrentSearch()
-                    resetSuggestionState(newAnalysisCycle = true)
-                    setStatus("按屏幕下半区帅/将识别，自动己方为${if (detectedAutoSide) "红方" else "黑方"}")
-                }
             }
 
             boardUpdatedAt = System.currentTimeMillis()
@@ -2979,25 +3018,28 @@ class ScreenAssistService : Service() {
             val previousBoard = if (isFreshBaseline) null else currentCanonical
             val previousFen = if (isFreshBaseline) "" else currentFen
 
-            // ==================== 轮次（不再由差分推断） ====================
-            // 1) 我方刚落子并拿到回执时，轮次已经被显式切到对方；此后屏幕上出现的
-            //    任何新稳定盘面，就是对方走过的那一手 → 切回我方。
-            // 2) 其余情况只看“这一帧里动的是哪一方的棋子”这一个纯结构信息：
-            //    动的是我方棋子 → 我方刚落完 → 轮到对方；判断不出来就保持当前轮次。
-            // 两条都不会拒收盘面，也不枚举合法着法、不要求“一手/两步可达”。
-            var nextRedGo = if (previousBoard == null) confirmedRedGo else currentRedGo
-            val boardReallyChanged = previousBoard != null &&
-                !AssistBoard.equal(previousBoard, confirmed.canonical)
-            if (boardReallyChanged) {
-                nextRedGo = if (currentRedGo != mySideIsRed()) {
-                    mySideIsRed()
-                } else {
-                    when (AssistBoard.movedSide(previousBoard!!, confirmed.canonical)) {
-                        mySideCode() -> !mySideIsRed()
-                        else -> currentRedGo
-                    }
-                }
+            // ==================== 轮次 ====================
+            // 我方着法由落子事务与落子回执背书；差分只用来证明“对方确实走了一步”这类可解析的单步变化。
+            // 解释不了的变化（动画残影、识别抖动、连场换局）绝不把回合推给“对方”，
+            // 否则会停在“等对方走”，表现为明明该我方走却一直不动。
+            val ourMoveInFlight = landingState != null ||
+                (lastOurLandingAt > 0L && System.currentTimeMillis() - lastOurLandingAt <= OUR_LANDING_BACKING_MS)
+            val turnDecision = TurnInferencePolicy.infer(
+                previous = previousBoard,
+                current = confirmed.canonical,
+                currentRedGo = currentRedGo,
+                mySideRed = mySideIsRed(),
+                autoMode = isAutoPlayOn(),
+                ourMoveInFlight = ourMoveInFlight,
+            )
+            if (previousBoard != null && !AssistBoard.equal(previousBoard, confirmed.canonical)) {
+                trace(
+                    "TURN_INFERENCE",
+                    "reason=${turnDecision.reason} redGo=${turnDecision.redGo} previousRedGo=$currentRedGo " +
+                        "mySideRed=${mySideIsRed()} ourMoveInFlight=$ourMoveInFlight",
+                )
             }
+            var nextRedGo = turnDecision.redGo
 
             val newFen = AssistBoard.toFen(confirmed.canonical, nextRedGo)
             val boardChanged = newFen != previousFen
@@ -4649,8 +4691,7 @@ class ScreenAssistService : Service() {
         lastRejectReason = null
         if (config.sideSelectionMode == SideSelectionMode.AUTO) {
             val detected = SideSelectionPolicy.detectAutoSideRed(res.screenRaw)
-            if (detected == null) {
-                autoSideDetectionReady = false
+            if (detected == null && !autoSideDetectionReady) {
                 val reason = "屏幕下半区无法唯一确认帅/将，棋面异常"
                 trace("AUTO_SIDE_REJECT", "reason=$reason source=manual-refresh")
                 tracker.reset(currentRedGo)
@@ -4662,7 +4703,22 @@ class ScreenAssistService : Service() {
                 postRender()
                 return
             }
-            if (config.autoSideRed != detected) config.autoSideRed = detected
+            // 用户显式点了「更新棋谱」：这一帧就是确认帧，不再等连续帧数。
+            val sideDecision = SideDetectionStabilityPolicy.observe(
+                state = SideDetectionStabilityPolicy.State(),
+                detected = detected,
+                current = config.autoSideRed,
+                required = 1,
+            )
+            sideStabilityState = sideDecision.state
+            if (sideDecision.changed) {
+                val previousSide = config.autoSideRed
+                config.autoSideRed = sideDecision.red!!
+                trace(
+                    "AUTO_SIDE_DETECTED",
+                    "red=${sideDecision.red} source=manual-refresh previous=$previousSide",
+                )
+            }
             autoSideDetectionReady = true
         }
         // 半自动「更新棋谱」只把盘面更新到当前识别结果，**不凭盘面差异翻转轮次**——
