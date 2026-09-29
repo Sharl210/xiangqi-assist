@@ -527,3 +527,51 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 - [ ] 用新包逐张复测最新目录的2张截图及旧10张样本。
 - [ ] 设备新日志确认落子核对拒绝不再持续增长，且能从回退基线继续识别和分析。
 - [ ] 上述所有截图和日志验收项全部通过后，才允许交付成功；否则保持未完成并继续修复。
+
+## P27 用户新增要求：连续十次识别失败按指数阶梯降低检测阈值、识别成功后复位
+
+### 原话与输入证据
+- [x] 用户原话已逐字追加至 `request.md`。
+- [x] 诉求要点：十次检测不到才降一档，每档按指数下降；识别成功后下一次回到正常档位；先保证不会无限卡死；大模型和小模型的所有失败截图都要通过才发版；在不降低效果的前提下降低功耗。
+
+### 实施
+- [x] 识别拒绝统一收口到 `recordVisionReject`：普通检测失败、棋面结构非法、落子核对失败、自动执子方判断失败各只计一次。
+- [x] 第 10/20/30… 次拒绝才降一档，阈值按指数因子下降并设下限；降档时清空裁剪网格，强制下一轮整屏重新定位。
+- [x] 合法棋面被接受、用户重置棋盘、新的一键准备会话，都回到严格基线。
+- [x] 双王、棋盘几何、合法点位、同格冲突和稳定帧安全门不因降档而放开。
+
+### 验收
+- [x] 定向单测在本机实跑通过。
+- [x] 远程 run 49（提交 `a45a3e1`，push 触发）success。
+- [ ] 设备新日志出现 `VISION_THRESHOLD_STEP`（misses=10/20…）并能自动恢复，不再需要手动点满棋盘。
+- [ ] 功耗与性能实测数据（1.3.4 测试包）。
+
+## P28 用户新增要求：修好本地构建工具链，减少对远程 Actions 的依赖
+
+### 原话与输入证据
+- [x] 用户原话已逐字追加至 `request.md`。
+- [x] 本地报错原文：`aapt2-8.6.1-11315950-linux/aapt2: No such file or directory`。
+
+### 根因
+- [x] 本机为 aarch64，AGP 只提供 x86_64 版 aapt2，直接执行必然失败；此前依靠 `android.aapt2FromMavenOverride` 指向本机可执行的 aapt2，该设置丢失后本地构建中断。
+
+### 实施
+- [x] 用户级 `~/.gradle/gradle.properties` 增加 `android.aapt2FromMavenOverride=/workspace/upgrade-cache/aapt2-wrapper-bin/aapt2`（qemu 包装器加载官方 8.6.1 aapt2），不改仓库文件，不影响 CI。
+
+### 验收
+- [x] `:app:processArmv8-DebugResources` BUILD SUCCESSFUL。
+- [x] `:app:testArmv8-DebugUnitTest` 实跑 440 项、432 通过；8 项失败全部是缺 Robolectric 原生库 `conscrypt_openjdk_jni-linux-aarch_64`，与本次改动无关。
+- [x] `:app:assembleArmv8-Release` BUILD SUCCESSFUL，产出 `app/build/outputs/apk/armv8-/release/XiangqiAssist_20260929_8_armv8-Release.apk`（97,154,355 字节，SHA-256 `cfb423dde0c458904a22c355fe4a56bfc17888eac1d7882a5406a18d1a06336d`）。
+- [x] 推送恢复：`a7372af..a45a3e1 main -> main`；远程 run 49 success。
+- [ ] 本地正式签名仍缺口令：当前本地包是调试签名（证书 `d01bc81a…`），不能覆盖已安装的正式版（证书 `f4dbd277…`）。
+
+### 备注
+- 归档分支 `archive/baseline-snapshot` 内含 `app/cchess.release.jks`，可取出；但没有口令无法签名。
+- 本地构建建议加 `--no-configuration-cache`：版本号取自 git 提交数，配置缓存会锁住旧值。
+
+### 本地正式签名打通（追加）
+- [x] 密钥来源：归档分支 `archive/baseline-snapshot:app/cchess.release.jks`；文件放在仓库外 `/root/.keystores/cchess.release.jks`，仓库工作树不放密钥。
+- [x] 口令只写在用户级 `~/.gradle/gradle.properties`（root 只读权限），不进仓库、不进 CI、不进日志与回复正文。
+- [x] 证据：本机 `assembleArmv8-Release` 与 `assembleArmv8-dotprod-Release` 均 BUILD SUCCESSFUL；两个包 APK v2 签名证书 SHA-256 都是 `f4dbd277973ca30798b84109735c2bc976afd177f87d361bc95574e781372dee`，与正式版一致，可覆盖安装。
+- [x] 产物归档：`/workspace/dist-xqdk-local-20260929/`，含两个 APK 与 `SHA256SUMS.txt`；包身份 `com.xiangqi.assist` / versionName 1.3.4 / versionCode 8；内置 `yolov5m_xq_fp32.tflite`、`yolov5n_xq_fp16.tflite`、`help.html`。
+- [x] 结论：本机已能独立完成编译、单测、双变体正式签名打包，远程 Actions 不再是自己验证的唯一途径。
