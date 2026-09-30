@@ -150,6 +150,12 @@ class ScreenAssistService : Service() {
 
         /** 每隔一段时间用整屏模型独立复核，防止局部裁剪在棋盘移动后自锁。 */
         private const val FULL_VISION_RECHECK_MS = 1800L
+
+        /**
+         * 静默放行的最大容忍时长：画面超过这段时间没有任何新帧，就不再当作“静止画面”，
+         * 而是当作取帧链路故障，交给看门狗重建，避免拿过期画面反复当新棋面。
+         */
+        private const val QUIET_RELEASE_MAX_FRAME_AGE_MS = 3_000L
         /**
          * 整屏复核的自适应上限。
          *
@@ -974,6 +980,10 @@ class ScreenAssistService : Service() {
     // 不读阶段机的展示状态：阶段机停摆时它反而最不可信（那正是“卡在计算中”的成因）。
     @Volatile private var pipelineWatchdogAt = 0L
     @Volatile private var lastStreamFrameAt = 0L
+    /** 自上次重建取帧管线以来收到的帧数；为 0 时说明重建没有恢复投递。 */
+    @Volatile private var framesSinceRebuild = 0
+    /** 连续多少次重建取帧管线之后仍然一帧都没收到。 */
+    @Volatile private var frameStallRebuilds = 0
     @Volatile private var streamStartedAt = 0L
     @Volatile private var captureStartedAt = 0L
     @Volatile private var lastStableWindowAt = 0L
@@ -1032,6 +1042,7 @@ class ScreenAssistService : Service() {
                     lastCaptureKickAt = lastCaptureKickAt,
                     noBoardIdle = noBoardIdle && sessionGrid == null && landing == null,
                     recoveriesWithoutProgress = recoveriesWithoutProgress,
+                    frameStallRebuilds = frameStallRebuilds,
                     now = now,
                 )
             )
@@ -1049,6 +1060,7 @@ class ScreenAssistService : Service() {
                         "inference=${recognitionInFlight.get()} " +
                         "inferenceAge=${ageOf(now, inferenceStartedAt)} pending=${pendingRecognitionAt > 0L} " +
                         "idle=$noBoardIdle blindRecoveries=$recoveriesWithoutProgress " +
+                        "framesSinceRebuild=$framesSinceRebuild stallRebuilds=$frameStallRebuilds " +
                         "recoverEvery=${PipelineHealthPolicy.recoveryIntervalMs(PipelineHealthPolicy.Health(now = now, recoveriesWithoutProgress = recoveriesWithoutProgress))}ms"
                 )
                 when (action) {
@@ -1068,8 +1080,13 @@ class ScreenAssistService : Service() {
                             recognitionInFlight.set(false)
                             trace("CAPTURE_REBUILD_STUCK_INFERENCE", "age=${now - inferenceStartedAt}")
                         }
+                        // 这一次重建期间到底有没有收到帧，是下一步该不该继续重建的唯一依据。
+                        if (framesSinceRebuild <= 0) frameStallRebuilds++ else frameStallRebuilds = 0
+                        framesSinceRebuild = 0
                         rebuildCapturePipeline()
                     }
+
+                    PipelineHealthPolicy.Action.REAUTHORIZE_CAPTURE -> reauthorizeCapturePipeline()
 
                     PipelineHealthPolicy.Action.NONE -> Unit
                 }
@@ -1160,11 +1177,29 @@ class ScreenAssistService : Service() {
     }
 
     /**
+     * 已经把「重建取帧」试到上限仍然一帧都收不到：本地无法再自行恢复。
+     * 释放本次屏幕共享并要求用户重新授权，而不是继续静默重建——那只会一直卡着不动。
+     */
+    private fun reauthorizeCapturePipeline() {
+        trace(
+            "CAPTURE_REAUTHORIZE",
+            "reason=no-frames-after-rebuilds stallRebuilds=$frameStallRebuilds phase=${refreshPhase()}",
+        )
+        frameStallRebuilds = 0
+        framesSinceRebuild = 0
+        releaseCapture()
+        captureResumePending = true
+        paused = true
+        refreshForegroundServiceTypeForCaptureState()
+        setStatus("屏幕画面长时间没有更新\n请点『继续』重新授权屏幕共享")
+        postRender()
+    }
+
+    /**
      * 取帧侧自愈：保留本次授权与唯一VirtualDisplay，只替换ImageReader并重接Surface。
      * Android 14+ 同一 MediaProjection 只能创建一次 VirtualDisplay，因此这里绝不重新创建。
      */
-    private fun rebuildCapturePipeline() {
-        if (stopping || overlayClosed || paused) return
+    private fun rebuildCapturePipeline() {        if (stopping || overlayClosed || paused) return
         val projection = mediaProjection ?: return
         val display = virtualDisplay ?: run {
             captureResumePending = true
@@ -1849,13 +1884,42 @@ class ScreenAssistService : Service() {
         if (!paused && !manualMode &&
             (isContinuousScanMode() || refresh.isActive || AssistPhase.needsBoard(p))) {
             val now = System.currentTimeMillis()
+            // 屏幕静止时 VirtualDisplay 不再投递新帧，八个连续样本永远凑不齐；
+            // 这里用“静默即稳定”放行最后一张样本，否则识别会一次都不发生。
+            val quiet = stableFrameWindow.releaseWhenQuiet(now)
+            if (quiet.ready) quiet.selected?.let { onQuietStableFrame(it, now) }
             val timeout = if (p == AssistPhase.Phase.WAITING)
                 HeartbeatPolicy.WAITING_SCAN_TIMEOUT_MS else HeartbeatPolicy.OTHER_SCAN_TIMEOUT_MS
             val lastProcessed = lastProcessedSampleAt
-            if (lastProcessed <= 0L || now - lastProcessed >= timeout) kickCapture()
-            mainHandler.postDelayed(this, maxOf(1L, timeout / 2))
+            val sinceFrame = if (lastStreamFrameAt > 0L) now - lastStreamFrameAt else Long.MAX_VALUE
+            // 只在“确实没有新帧，且样本也已经陈旧”时才去探一次，避免无谓地拉缓冲（功耗）。
+            if (sinceFrame >= timeout && (lastProcessed <= 0L || now - lastProcessed >= timeout)) kickCapture()
+            mainHandler.postDelayed(this, maxOf(100L, timeout / 2))
         }
         }
+    }
+
+    /**
+     * 静默放行的关键帧：画面在 [QUIET_RELEASE_MAX_FRAME_AGE_MS] 内没有任何新帧，
+     * 说明屏幕内容没有变化，直接用窗口里的最后一张样本进入一次识别。
+     *
+     * 超过这个上限就不属于“画面静止”，而是取帧链路出了问题，交给看门狗去重建，
+     * 绝不能拿一张过期画面反复当新棋面用。
+     */
+    private fun onQuietStableFrame(frame: Frame, now: Long) {
+        if (stopping || overlayClosed || paused || manualMode) return
+        if (captureDemand == CaptureDemand.OFF && !refresh.isActive) return
+        val frameAge = if (lastStreamFrameAt > 0L) now - lastStreamFrameAt else Long.MAX_VALUE
+        if (frameAge > QUIET_RELEASE_MAX_FRAME_AGE_MS) return
+        stableFrameCount = STREAM_STABLE_FRAME_COUNT
+        stableFrameAt = now
+        lastStableWindowAt = now
+        streamAnomalyStreak = 0
+        trace(
+            "STREAM_QUIET_RELEASE",
+            "frameAge=$frameAge samples=${stableFrameWindow.sampleCount()} phase=${refreshPhase()}",
+        )
+        publishFrames(listOf(frame))
     }
 
     /** Single-flight capture probe. It may pull one ImageReader buffer, but never skips the stable window. */
@@ -3853,6 +3917,7 @@ class ScreenAssistService : Service() {
         // 拿到缓冲就说明录屏流还活着——这是“录制侧是否停摆”的原始证据，
         // 必须在任何阶段过滤之前记录，否则停摆与“按设计不取帧”无法区分。
         lastStreamFrameAt = receivedAt
+        framesSinceRebuild++
         if (streamStartedAt <= 0L) streamStartedAt = receivedAt
         try {
             val epoch = recognitionEpoch

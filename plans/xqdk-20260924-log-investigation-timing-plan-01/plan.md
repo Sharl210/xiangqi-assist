@@ -644,3 +644,27 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 - [x] 建立验收文档 `plans/xqdk-20260924-log-investigation-timing-plan-01/acceptance.md`（第 1 轮），逐条列 30 条原始需求与状态。
 - [ ] 设备复测：回合不再判反、逐帧换边、等待响应变快、卡死自恢复、功耗实测。
 - [ ] 功耗优化（R-23）尚未开始，计划闭环未 PASS，不得交付。
+
+## P32 第二份“整轮零识别”日志：VirtualDisplay 静止不投帧（2026-09-30 凌晨）
+
+### 原话与输入证据
+- [x] 用户原话已逐字追加至 `request.md`（“还是用不了”“中等模型也用不了了”）。
+- [x] 用户粘贴的第二份真机日志：会话内 `VISION_RAW` 仍为 0，`stableAge` 恒为 -1；`framesSinceRebuild` 概念缺失前，日志只能看到 `frameAge` 在 250–500ms 与 2.8–5.0s 之间跳变，稳态下每 5 秒一次 `REBUILD_CAPTURE` 且期间只回一帧。
+- [x] 本机复跑全部 55 张截图仍为 Medium 55/55、Lite 55/55，**证明两档模型离线都能用**，因此“中等模型也用不了”不是模型问题，而是取帧/稳定窗口从未放行。
+
+### 根因
+- [ ] 录屏流走的是 VirtualDisplay，**屏幕内容不变化时它不再投递新帧**；而进入识别的前置条件是“连续 8 个样本稳定”，静止画面上永远凑不齐 → 识别一次都不会发生。
+- [ ] 附带缺陷：取帧重建（REBUILD_CAPTURE）此前的恢复间距参与指数退避，最长要等 5 秒才重建，真正停掉的投递被拖得更久。
+
+### 实施
+- [x] `StableFrameWindow` 新增静默放行：最后一张样本之后静默超过 600ms 即用窗口内最后一张样本放行；已有 ≥2 张样本时仍要求彼此稳定；两次静默放行最小间隔 500ms；清窗口时一并复位。
+- [x] `ScreenAssistService`：`capturePump` 每个心跳尝试静默放行并记录 `STREAM_QUIET_RELEASE`；画面超过 3 秒没有新帧时不放行（判定为取帧故障，交给看门狗）；探帧节流不再低于 100ms。
+- [x] `PipelineHealthPolicy`：新增 `STREAM_REBUILD_INTERVAL_MS=625`（取帧重建不参与退避）与 `MAX_FRAME_STALL_REBUILDS=3`；连续 3 次重建仍零帧时返回新动作 `REAUTHORIZE_CAPTURE`。
+- [x] `ScreenAssistService`：新增 `reauthorizeCapturePipeline()`，释放屏幕共享并提示“请点『继续』重新授权屏幕共享”，不再无限重建；新增 `framesSinceRebuild`/`frameStallRebuilds` 并写入看门狗日志。
+- [x] 单测：`StableFrameWindowTest` 新增 5 项（静默放行、最小间隔、不稳定样本拒绝、空窗口无副作用）；`PipelineHealthPolicyTest` 新增 3 项（帧停摆重建、连续停摆升级为重新授权、重建不受退避影响）。
+
+### 验证
+- [x] `testArmv8-DebugUnitTest` 470 项 462 通过（8 项为环境缺 Robolectric 原生库，与改动无关）。
+- [x] 双变体 Release 打包成功；产物 `/workspace/dist-xqdk-local-20260930-r4/`（含 `SHA256SUMS.txt`），v2 证书 `f4dbd277…` 与已发布正式版一致。
+- [ ] 设备复测：需在**棋盘应用内**跑一遍，确认日志出现 `VISION_RAW tier=MEDIUM/LITE` 与 `STREAM_QUIET_RELEASE`，且 `stallRebuilds` 不再连涨。
+- [ ] 上一份日志的现场是相册应用（前台包名 `com.coloros.gallery3d`），屏幕上没有棋盘；复测时须在棋盘界面进行，否则无法判定修复效果。

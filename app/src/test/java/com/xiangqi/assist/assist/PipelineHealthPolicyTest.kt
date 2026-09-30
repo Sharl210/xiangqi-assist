@@ -383,4 +383,52 @@ class PipelineHealthPolicyTest {
         assertEquals(5_000L, interval(3))
         assertEquals(5_000L, interval(8))
     }
+
+    /** 录屏真的不再投递帧时的健康态：帧与样本都停在过去某一刻。 */
+    private fun stalledStream(
+        now: Long = 10_000L,
+        lastRecoveryAt: Long = 0L,
+        recoveriesWithoutProgress: Int = 0,
+        frameStallRebuilds: Int = 0,
+    ) = base(
+        now = now,
+        lastFrameAt = 1_000L,
+        streamStartedAt = 1_000L,
+        captureStartedAt = 1_000L,
+        lastStableAt = 0L,
+        lastVisionAt = 0L,
+        visionEpochStartedAt = 0L,
+        lastRecognitionCompletedAt = 0L,
+        lastProcessedSampleAt = 1_000L,
+        lastRecoveryAt = lastRecoveryAt,
+    ).copy(recoveriesWithoutProgress = recoveriesWithoutProgress, frameStallRebuilds = frameStallRebuilds)
+
+    @Test fun `frame stall rebuilds the capture stream`() {
+        assertEquals(
+            PipelineHealthPolicy.Action.REBUILD_CAPTURE,
+            PipelineHealthPolicy.evaluate(stalledStream()),
+        )
+    }
+
+    @Test fun `repeated frame stalls finally ask the user to re-authorize instead of looping`() {
+        assertEquals(
+            PipelineHealthPolicy.Action.REAUTHORIZE_CAPTURE,
+            PipelineHealthPolicy.evaluate(
+                stalledStream(frameStallRebuilds = PipelineHealthPolicy.MAX_FRAME_STALL_REBUILDS)
+            ),
+        )
+    }
+
+    @Test fun `frame stall rebuild is not delayed by the blind-recovery backoff`() {
+        // 700ms 前恢复过一次：指数退避已经涨到 5000ms，但取帧重建仍按固定 625ms 放行。
+        val action = PipelineHealthPolicy.evaluate(
+            stalledStream(now = 10_000L, lastRecoveryAt = 9_300L, recoveriesWithoutProgress = 4)
+        )
+        assertEquals(PipelineHealthPolicy.Action.REBUILD_CAPTURE, action)
+        assertTrue(
+            PipelineHealthPolicy.recoveryIntervalMs(
+                PipelineHealthPolicy.Health(now = 10_000L, recoveriesWithoutProgress = 4)
+            ) > PipelineHealthPolicy.STREAM_REBUILD_INTERVAL_MS
+        )
+    }
 }

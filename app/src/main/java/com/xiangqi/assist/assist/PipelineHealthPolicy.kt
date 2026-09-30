@@ -20,6 +20,18 @@ object PipelineHealthPolicy {
     /** Rate limit for destructive pipeline rebuild/reset actions. */
     const val MIN_RECOVERY_INTERVAL_MS = 625L
     /**
+     * 取帧重建（REBUILD_CAPTURE）的固定最小间距。
+     *
+     * 它**不参与**指数退避：退避是给“反复清识别状态但仍有帧”的场景用的；
+     * 取帧重建针对的是录屏投递真的停了，这时再等 5 秒只会让画面停更久。
+     */
+    const val STREAM_REBUILD_INTERVAL_MS = 625L
+    /**
+     * 连续多少次“重建取帧之后仍然一帧都没收到”就判定本次屏幕共享授权已经无法本地恢复，
+     * 改为让用户重新授权，而不是无限重建。
+     */
+    const val MAX_FRAME_STALL_REBUILDS = 3
+    /**
      * 连续多次“恢复之后仍然没有任何一次识别完成”时，恢复间距按 2 倍递增到这个上限。
      *
      * 这是对自激恢复环的硬约束：早先的恢复动作会把“上一次样本/稳定窗口/识别完成”这些
@@ -42,6 +54,8 @@ object PipelineHealthPolicy {
         REBASE_LANDING,
         RESET_VISION,
         REBUILD_CAPTURE,
+        /** 反复重建都取不到帧：本地已无法恢复，需要用户重新授权屏幕共享。 */
+        REAUTHORIZE_CAPTURE,
     }
 
     data class Health(
@@ -75,6 +89,8 @@ object PipelineHealthPolicy {
         val noBoardIdle: Boolean = false,
         /** 上次破坏性恢复之后，还没有任何一次识别完成的连续次数。 */
         val recoveriesWithoutProgress: Int = 0,
+        /** 连续多少次重建取帧之后仍然一帧都没收到。 */
+        val frameStallRebuilds: Int = 0,
         val now: Long = 0L,
     )
 
@@ -97,7 +113,7 @@ object PipelineHealthPolicy {
         // 唯一的例外仍是真正的取帧停摆：那时候是录屏侧坏了，必须重建。
         if (h.noBoardIdle) {
             if (h.lastFrameAt > 0L && h.now - h.lastFrameAt > STREAM_FRAME_STALL_MS) {
-                return if (recoveryAllowed(h)) Action.REBUILD_CAPTURE else Action.NONE
+                return frameStallAction(h)
             }
             val idleBase = maxOf(h.lastProcessedSampleAt, h.streamStartedAt, h.captureStartedAt)
             val idleAge = if (idleBase > 0L) h.now - idleBase else Long.MAX_VALUE
@@ -127,10 +143,10 @@ object PipelineHealthPolicy {
         if (h.lastFrameAt <= 0L && h.captureStartedAt > 0L &&
             h.now - h.captureStartedAt > STREAM_FRAME_STALL_MS
         ) {
-            return if (recoveryAllowed(h)) Action.REBUILD_CAPTURE else Action.NONE
+            return frameStallAction(h)
         }
         if (h.lastFrameAt > 0L && h.now - h.lastFrameAt > STREAM_FRAME_STALL_MS) {
-            return if (recoveryAllowed(h)) Action.REBUILD_CAPTURE else Action.NONE
+            return frameStallAction(h)
         }
 
         val streamBase = maxOf(h.streamStartedAt, h.captureStartedAt)
@@ -206,6 +222,20 @@ object PipelineHealthPolicy {
 
     private fun recoveryAllowed(h: Health): Boolean =
         h.lastRecoveryAt <= 0L || h.now - h.lastRecoveryAt >= recoveryIntervalMs(h)
+
+    /** 取帧重建用固定间距，不受指数退避影响（退避只用于 RESET_VISION）。 */
+    private fun rebuildAllowed(h: Health): Boolean =
+        h.lastRecoveryAt <= 0L || h.now - h.lastRecoveryAt >= STREAM_REBUILD_INTERVAL_MS
+
+    /**
+     * 帧停摆时的动作：重建取帧；若连续多次重建后依然一帧都没有，
+     * 说明本次屏幕共享已无法本地恢复，改为要求用户重新授权，避免无限重建。
+     */
+    private fun frameStallAction(h: Health): Action = when {
+        !rebuildAllowed(h) -> Action.NONE
+        h.frameStallRebuilds >= MAX_FRAME_STALL_REBUILDS -> Action.REAUTHORIZE_CAPTURE
+        else -> Action.REBUILD_CAPTURE
+    }
 
     private fun captureKickAllowed(h: Health): Boolean {
         val cooldown = if (h.noBoardIdle) IDLE_FRAME_PROGRESS_KICK_MS else CAPTURE_KICK_COOLDOWN_MS

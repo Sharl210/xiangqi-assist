@@ -97,3 +97,7 @@ plan模式
 
 性能优化开始
 （同轮粘贴的真机日志摘要见 `docs/evidence/assist-log-lite-blind-recovery-20260929T2303-summary.md`；关键标记：整轮 `VISION_RAW` 0 次、`stableAge=-1` 持续、`PIPELINE_WATCHDOG_ACTION` 中 KICK_CAPTURE/REBUILD_CAPTURE/RESET_VISION 30+ 次、`PIPELINE_VISION_RESET grid=false misses=0`，会话以 `SESSION_END|reason=one_tap_close` 结束。）
+
+用户新增要求（2026-09-30 凌晨，Lite 全空转日志 + 中等模型也不可用）：还是用不了
+
+用户新增要求（2026-09-30 凌晨）：中等模型也用不了了

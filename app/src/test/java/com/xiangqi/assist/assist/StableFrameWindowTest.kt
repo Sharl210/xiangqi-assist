@@ -61,6 +61,39 @@ class StableFrameWindowTest {
         assertFalse(next.ready)
     }
 
+    @Test fun `static screen is released without waiting for eight frames`() {
+        // VirtualDisplay 在画面静止时不再投递新帧，八个样本永远凑不齐。
+        val window = StableFrameWindow()
+        val still = frame(0x101010, 0)
+        window.accept(still, 1, 1000L)
+        assertFalse(window.releaseWhenQuiet(1_200L).ready)
+        val quiet = window.releaseWhenQuiet(1_700L)
+        assertTrue(quiet.ready)
+        assertTrue(quiet.selected === still)
+    }
+
+    @Test fun `quiet release honours the minimum gap so the same still frame is not re-run`() {
+        val window = StableFrameWindow()
+        window.accept(frame(0x101010, 0), 1, 1000L)
+        assertTrue(window.releaseWhenQuiet(1_700L).ready)
+        window.rearm()
+        assertFalse(window.releaseWhenQuiet(1_750L).ready)
+        assertTrue(window.releaseWhenQuiet(2_300L).ready)
+    }
+
+    @Test fun `quiet release refuses unstable samples`() {
+        val window = StableFrameWindow()
+        window.accept(frame(0x101010, 0), 1, 1000L)
+        window.accept(frame(0xFFFFFF, 1), 1, 1_100L)
+        assertFalse(window.releaseWhenQuiet(1_900L).ready)
+    }
+
+    @Test fun `quiet release is a no-op on an empty window`() {
+        val window = StableFrameWindow()
+        assertFalse(window.releaseWhenQuiet(5_000L).ready)
+        assertEquals(0, window.sampleCount())
+    }
+
     @Test fun `vision-only epoch change keeps the samples already collected`() {
         val window = StableFrameWindow()
         repeat(5) { i -> window.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 125L) }
