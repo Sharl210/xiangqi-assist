@@ -150,6 +150,17 @@ class ScreenAssistService : Service() {
 
         /** 每隔一段时间用整屏模型独立复核，防止局部裁剪在棋盘移动后自锁。 */
         private const val FULL_VISION_RECHECK_MS = 1800L
+        /**
+         * 整屏复核的自适应上限。
+         *
+         * 裁剪锚点连续产出通过安全门的棋面时，说明锚点仍然对得上棋盘；
+         * 此时把整屏复核的间隔逐步放宽，省掉那些“为安全而付出、却每次结论都一样”的整屏推理。
+         * 任何一次拒绝或锚点丢失立刻回到 [FULL_VISION_RECHECK_MS]，安全网不缩水。
+         */
+        private const val FULL_VISION_RECHECK_MAX_MS = 5_400L
+        private const val FULL_VISION_RECHECK_BONUS_MS = 1800L
+        /** 每连续多少次稳定通过，才放宽一级整屏复核间隔。 */
+        private const val FULL_VISION_RECHECK_STEP_HITS = 8
         /** 连续录屏输出的最长边；模型只需640输入，降低全屏拷贝和内存压力。 */
         private const val CAPTURE_MAX_DIMENSION = 1440
 
@@ -970,6 +981,16 @@ class ScreenAssistService : Service() {
     @Volatile private var inferenceStartedAt = 0L
     @Volatile private var lastPipelineRecoveryAt = 0L
     @Volatile private var lastVisionResetStatusAt = 0L
+    /** 上一次整屏复核之后的连续稳定通过次数，用于自适应放宽整屏复核间隔。 */
+    @Volatile private var fullVisionAnchorStreak = 0
+    @Volatile private var fullVisionRecheckBonusMs = 0L
+    /**
+     * 画面里连着识别不到任何棋子，且当前没有可用裁剪网格（屏幕上没有棋盘）。
+     * 这时管线按“待机”处理：不触发破坏性恢复，采样周期放宽一倍。
+     */
+    @Volatile private var noBoardIdle = false
+    /** 上次破坏性恢复之后仍未有一次识别完成的连续次数；用于把恢复间距按 2 倍递增。 */
+    @Volatile private var recoveriesWithoutProgress = 0
     private var pipelineWatchdogArmed = false
 
     private fun ageOf(now: Long, at: Long): Long = if (at <= 0L) -1L else now - at
@@ -1009,11 +1030,16 @@ class ScreenAssistService : Service() {
                         mediaProjection != null && imageReader != null && virtualDisplay != null,
                     lastRecoveryAt = lastPipelineRecoveryAt,
                     lastCaptureKickAt = lastCaptureKickAt,
+                    noBoardIdle = noBoardIdle && sessionGrid == null && landing == null,
+                    recoveriesWithoutProgress = recoveriesWithoutProgress,
                     now = now,
                 )
             )
             if (action != PipelineHealthPolicy.Action.NONE) {
-                if (action != PipelineHealthPolicy.Action.KICK_CAPTURE) lastPipelineRecoveryAt = now
+                if (action != PipelineHealthPolicy.Action.KICK_CAPTURE) {
+                    lastPipelineRecoveryAt = now
+                    recoveriesWithoutProgress++
+                }
                 trace(
                     "PIPELINE_WATCHDOG_ACTION",
                     "action=$action phase=${refreshPhase()} landing=${landing?.stage} " +
@@ -1021,7 +1047,9 @@ class ScreenAssistService : Service() {
                         "stableAge=${ageOf(now, lastStableWindowAt)} visionAge=${ageOf(now, lastVisionAt)} " +
                         "recognitionAge=${ageOf(now, lastRecognitionCompletedAt)} " +
                         "inference=${recognitionInFlight.get()} " +
-                        "inferenceAge=${ageOf(now, inferenceStartedAt)} pending=${pendingRecognitionAt > 0L}"
+                        "inferenceAge=${ageOf(now, inferenceStartedAt)} pending=${pendingRecognitionAt > 0L} " +
+                        "idle=$noBoardIdle blindRecoveries=$recoveriesWithoutProgress " +
+                        "recoverEvery=${PipelineHealthPolicy.recoveryIntervalMs(PipelineHealthPolicy.Health(now = now, recoveriesWithoutProgress = recoveriesWithoutProgress))}ms"
                 )
                 when (action) {
                     PipelineHealthPolicy.Action.KICK_CAPTURE -> kickCapture()
@@ -1086,18 +1114,42 @@ class ScreenAssistService : Service() {
         }
     }
 
-    /** 识别侧自愈：丢弃裁剪网格与稳定窗口，整屏重找；不复位有效识图正在执行的任务。 */
+    /**
+     * 识别侧自愈：丢弃裁剪网格与锚点，要求下一帧整屏重找。
+     *
+     * 这里**不清空已经积累的稳定窗口**，也不清空取帧/稳定/识别的进展时间戳：
+     * 自愈改变的只是“下一帧用哪个锚点推理”，并不否定“画面已经连续稳定”这个既有结论。
+     * 早先的做法把这些一起清掉，于是每 1.5 秒一次的自愈会反复打断需要 1 秒（8×125ms）才能
+     * 成立的稳定窗口，管线一次识别都产不出来；而看门狗又因为时间戳被清零而判定“长期无进展”，
+     * 继续加压恢复——真机日志里整轮 35 秒 0 次识别、30+ 次 KICK/REBUILD/RESET 就是这条自激环。
+     */
     private fun recoverVisionPipeline() {
-        trace("PIPELINE_VISION_RESET", "grid=${sessionGrid != null} misses=$yoloMissStreak")
+        trace(
+            "PIPELINE_VISION_RESET",
+            "grid=${sessionGrid != null} misses=$yoloMissStreak idle=$noBoardIdle " +
+                "blindRecoveries=$recoveriesWithoutProgress " +
+                "keepSamples=${stableFrameCount > 0}",
+        )
         sessionGrid = null
         cropUnstableStreak = 0
         lastFullVisionCheckAt = 0L
+        fullVisionAnchorStreak = 0
+        fullVisionRecheckBonusMs = 0L
         recognitionEpoch++
-        abortCaptureWindow()
+        // 保留稳定窗口样本：只重开释放闸门，下一个样本即可参与判定。
+        stableFrameWindow.adoptEpoch(recognitionEpoch, preserveSamples = true)
+        stableFrameWindow.rearm()
+        visionEpochStartedAt = System.currentTimeMillis()
         lastMappedAt = 0L
-        beginVisionEpoch()
+        synchronized(frameQueueLock) {
+            pendingFrame = null
+            if (!recognitionInFlight.get()) {
+                frameConsumeScheduled = false
+                frameConsumeScheduledAt = 0L
+            }
+        }
         syncCaptureDemand()
-        kickCapture(forceProcess = true)
+        kickCapture()
         // 这条恢复会周期性发生（比如棋盘被挡住），状态行不能每 6 秒刷一次同样的字。
         val now = System.currentTimeMillis()
         if (now - lastVisionResetStatusAt > VISION_RESET_STATUS_INTERVAL_MS) {
@@ -1821,7 +1873,7 @@ class ScreenAssistService : Service() {
                     val now = System.currentTimeMillis()
                     lastStreamFrameAt = now
                     if (streamStartedAt <= 0L) streamStartedAt = now
-                    if (FrameStabilityPolicy.shouldSample(now, lastStreamSampleAt)) {
+                    if (FrameStabilityPolicy.shouldSample(now, lastStreamSampleAt, streamSamplePeriodMs())) {
                         lastStreamSampleAt = now
                         consumeStreamSample(imageToFrame(image, now), recognitionEpoch, now)
                     }
@@ -2173,6 +2225,10 @@ class ScreenAssistService : Service() {
         beginVisionEpoch(captureStartedAt)
         inferenceStartedAt = 0L
         lastPipelineRecoveryAt = 0L
+        recoveriesWithoutProgress = 0
+        noBoardIdle = false
+        fullVisionAnchorStreak = 0
+        fullVisionRecheckBonusMs = 0L
         // 新一轮运行：上一轮预选记下的棋面与落点不再代表眼前这盘棋。
         previewSnapshot.clear()
         armPipelineWatchdog()
@@ -2605,6 +2661,9 @@ class ScreenAssistService : Service() {
             // 下一个125ms样本即可再次推理，不必重新等待八个样本。
             stableFrameWindow.rearm()
             val reason = lastRecognitionRejectReason ?: "稳定画面未确认"
+            // 一个棋子都没检出 = 屏幕上没有棋盘（不是“识别不确定”）。这时管线进入待机：
+            // 不触发破坏性恢复（没有裁剪网格可清），采样周期减半，等棋盘出现再自动恢复。
+            noBoardIdle = (yoloDetector?.lastPieceDets ?: 0) == 0
             recordVisionReject(reason, epoch)
             streamAnomalyStreak++
             if (refresh.isActive) refresh.consumeAttempt(lastFailReason)
@@ -2667,6 +2726,19 @@ class ScreenAssistService : Service() {
 
         streamAnomalyStreak = 0
         resetVisionRecoveryAfterAccepted()
+        // 通过安全门 = 屏幕上有棋盘：退出待机，采样恢复 8fps。
+        noBoardIdle = false
+        // 锚点连续通过时逐步放宽整屏复核；任何一次拒绝都会把它打回严格值。
+        if (mapped.anchorSource != DetectionBoardMapper.AnchorSource.PIECE_BBOX) {
+            fullVisionAnchorStreak++
+            if (fullVisionAnchorStreak % FULL_VISION_RECHECK_STEP_HITS == 0) {
+                fullVisionRecheckBonusMs = (fullVisionRecheckBonusMs + FULL_VISION_RECHECK_BONUS_MS)
+                    .coerceAtMost(FULL_VISION_RECHECK_MAX_MS - FULL_VISION_RECHECK_MS)
+            }
+        } else {
+            fullVisionAnchorStreak = 0
+            fullVisionRecheckBonusMs = 0L
+        }
         lastSeen = SeenBoard(canonical, frame.capturedAt)
         sessionGrid = mapped.grid
         lastMappedAt = System.currentTimeMillis()
@@ -3787,7 +3859,7 @@ class ScreenAssistService : Service() {
             if (stopping || overlayClosed || paused || manualMode ||
                 (captureDemand == CaptureDemand.OFF && !refresh.isActive)) return
             val now = receivedAt
-            if (!FrameStabilityPolicy.shouldSample(now, lastStreamSampleAt)) return
+            if (!FrameStabilityPolicy.shouldSample(now, lastStreamSampleAt, streamSamplePeriodMs())) return
             lastStreamSampleAt = now
             val frame = imageToFrame(image, now)
             consumeStreamSample(frame, epoch, now)
@@ -3868,6 +3940,9 @@ class ScreenAssistService : Service() {
                 } finally {
                     if (item.epoch == recognitionEpoch) {
                         lastRecognitionCompletedAt = System.currentTimeMillis()
+                        // 有一次识别真正完成，就说明管线在推进：把“连续无进展恢复”清零，
+                        // 恢复间距回到起步值（而不是继续按 2 倍递增）。
+                        recoveriesWithoutProgress = 0
                     }
                     recognitionInFlight.set(false)
                     inferenceStartedAt = 0L
@@ -6068,10 +6143,13 @@ class ScreenAssistService : Service() {
         }
     }
 
-    /** 统一登记一次识别拒绝；阈值降级只在每第十次发生，并触发下一轮整屏重定位。 */
+    /** 统一登记一次识别拒绝；阈值降级只在每第三次发生，并触发下一轮整屏重定位。 */
     private fun recordVisionReject(reason: String, epoch: Long? = null) {
         yoloMissStreak++
         lastFailReason = reason
+        // 任何一次拒绝都说明“锚点可能已经不可信”：整屏复核的放宽立即作废，回到严格间隔。
+        fullVisionAnchorStreak = 0
+        fullVisionRecheckBonusMs = 0L
         thresholdRecoveryState = DetectionThresholdRecoveryPolicy.onRejected(thresholdRecoveryState)
         trace(
             "VISION_REJECT",
@@ -6273,6 +6351,17 @@ class ScreenAssistService : Service() {
 
 
     /** 模型按当前定位策略只运行一次：稳定关键帧通常使用棋盘裁剪，周期到期时用整屏重新定位。 */
+    /**
+     * 待机（屏幕上没有棋盘）时把采样周期从 125ms 放宽到 250ms：
+     * 帧拷贝与签名计算各减半，棋盘出现时最多 250ms 就能被采到，仍在一次稳定窗口之内。
+     */
+    private fun streamSamplePeriodMs(): Long =
+        if (noBoardIdle) FrameStabilityPolicy.IDLE_SAMPLE_PERIOD_MS else FrameStabilityPolicy.SAMPLE_PERIOD_MS
+
+    /** 整屏复核间隔：锚点连续通过时逐步放宽，拒绝即回到严格值（见 [FULL_VISION_RECHECK_MAX_MS]）。 */
+    private fun fullVisionRecheckMs(): Long =
+        (FULL_VISION_RECHECK_MS + fullVisionRecheckBonusMs).coerceAtMost(FULL_VISION_RECHECK_MAX_MS)
+
     private fun detectVision(
         frame: Frame,
         yolo: YoloBoardDetector,
@@ -6295,7 +6384,7 @@ class ScreenAssistService : Service() {
             )
         }
         val now = System.currentTimeMillis()
-        val fullDue = crop == null || now - lastFullVisionCheckAt >= FULL_VISION_RECHECK_MS
+        val fullDue = crop == null || now - lastFullVisionCheckAt >= fullVisionRecheckMs()
         val result = if (fullDue) {
             lastFullVisionCheckAt = now
             // 本次稳定关键帧只执行一次整屏/框选范围推理；下一次样本再切换到裁剪定位。

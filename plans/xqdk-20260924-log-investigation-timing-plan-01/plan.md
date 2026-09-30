@@ -591,6 +591,27 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 - [ ] 待用户回话：两条新候选是否上正式库；密钥是否入箱。
 - [x] 本轮顺带清理：读取正式库时发现 `AB2-C-075` 保存了两个 GitHub 令牌明文，已按凭据引用规则改写为保险箱条目引用并按命名规范改名为 `C-20260929T231702-a95dcf27`，全库引用同步；明文令牌在两库中已为 0。
 
+## P31 用户新增要求：小模型整轮零识别与性能优化（2026-09-29 夜）
+
+### 原话与输入证据
+- [x] 用户原话“小模型不可用 / 性能优化开始”已按语义追加至 `request.md`，同轮粘贴的真机日志摘要存 `docs/evidence/assist-log-lite-blind-recovery-20260929T2303-summary.md`。
+- [x] 该日志整段会话 `VISION_RAW` = 0、`stableAge` 恒为 -1，而 `KICK_CAPTURE` / `REBUILD_CAPTURE` / `RESET_VISION` 合计 30+ 次。
+
+### 根因
+- [x] 识别自愈同时清空了裁剪网格、稳定窗口样本与全部“进展时间戳”；稳定窗口需要 8×125ms=1000ms 才能成立，而看门狗把“没有稳定窗口”按 1500ms 判故障，于是自愈不断打断窗口，而时间戳被清零又让看门狗继续加压 → 自激恢复环，整轮 0 次识别。
+
+### 实施与验收清单
+- [x] `recoverVisionPipeline` 改为非破坏性：只丢弃裁剪网格与锚点、保留稳定窗口样本（新增 `StableFrameWindow.adoptEpoch(preserveSamples = true)`），不再清零进展时间戳。
+- [x] 恢复间距在“连续无进展”时按 2 倍递增（625ms → 最多 5s），任一次识别完成后归零；日志新增 `blindRecoveries` 与 `recoverEvery` 字段。
+- [x] 屏幕上没有棋盘（`noBoardIdle`：0 个棋子检出且无裁剪网格）时按待机处理：不触发破坏性恢复，取帧探测从 250ms 放宽到 1000ms；真有取帧停摆时仍重建。
+- [x] 降耗：待机采样周期 125ms → 250ms；裁剪锚点连续 8 次通过安全门后整屏复核间隔 1800ms 逐步放宽到最多 5400ms，任一拒绝立即回到 1800ms。
+- [x] 新增/更新策略单测：`PipelineHealthPolicyTest` +4（待机否决破坏性恢复、待机探测节奏、待机仍重建真死流、恢复间距指数递增）、`StableFrameWindowTest` +2（自愈保留样本 / 结构性复位清样本）、`FrameStabilityPolicyTest` +1（待机周期）。定向测试 BUILD SUCCESSFUL。
+- [x] 全量本机单测：463 项，455 通过；8 项失败全部是环境缺 Robolectric 原生库（`conscrypt_openjdk_jni-linux-aarch_64`），与本次改动无关。
+- [x] 测试 log 全部 55 张截图本机复跑：Medium 55/55、Lite 55/55（`docs/evidence/test-log-screenshot-acceptance.json`）。
+- [x] 双变体正式签名打包：`/workspace/dist-xqdk-local-20260929-r3/`，包名 `com.xiangqi.assist`、1.3.4 / code 8、证书 `f4dbd277…` 与已发布正式版一致。
+- [ ] 设备复测：确认新日志出现 `VISION_RAW`、`VISION_THRESHOLD_STEP misses=3`、`blindRecoveries` 不再连涨；未取得新日志前不判定该缺陷闭环。
+- [ ] 功耗实时数据（电流/温度）未采集。
+
 
 ## P30 用户新增要求：走子方判定错误与全量截图验收（2026-09-29 晚）
 

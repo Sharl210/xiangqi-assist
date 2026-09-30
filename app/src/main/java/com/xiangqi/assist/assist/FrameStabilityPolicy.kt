@@ -7,6 +7,12 @@ import kotlin.math.max
 object FrameStabilityPolicy {
     const val SAMPLE_FPS = 8
     const val SAMPLE_PERIOD_MS = 1_000L / SAMPLE_FPS
+    /**
+     * 待机采样周期：画面里连着好几帧一个棋子都没有（不是“识别不确定”，而是“屏幕上根本没有棋盘”）。
+     * 这时把采样从 8fps 降到 4fps，帧拷贝与签名计算各减半；棋盘出现时最多 250ms 就能被采到，
+     * 识别延迟仍在一次稳定窗口（1 秒）之内，属于“效果不变、功耗下降”。
+     */
+    const val IDLE_SAMPLE_PERIOD_MS = 250L
     const val REQUIRED_STABLE_FRAMES = 8
     const val MAX_MEAN_CHANNEL_DELTA = 0.035
     const val MAX_CHANGED_SAMPLE_FRACTION = 0.015
@@ -18,8 +24,12 @@ object FrameStabilityPolicy {
 
     class Signature internal constructor(internal val rgb: IntArray)
 
-    fun shouldSample(now: Long, previousSampleAt: Long): Boolean =
-        previousSampleAt == Long.MIN_VALUE || now - previousSampleAt >= SAMPLE_PERIOD_MS
+    fun shouldSample(
+        now: Long,
+        previousSampleAt: Long,
+        periodMs: Long = SAMPLE_PERIOD_MS,
+    ): Boolean =
+        previousSampleAt == Long.MIN_VALUE || now - previousSampleAt >= periodMs
 
     fun signature(
         frame: Frame,

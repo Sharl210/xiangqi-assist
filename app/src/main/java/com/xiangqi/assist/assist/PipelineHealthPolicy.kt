@@ -19,6 +19,17 @@ object PipelineHealthPolicy {
     const val VISION_STALL_MS = 2_500L
     /** Rate limit for destructive pipeline rebuild/reset actions. */
     const val MIN_RECOVERY_INTERVAL_MS = 625L
+    /**
+     * 连续多次“恢复之后仍然没有任何一次识别完成”时，恢复间距按 2 倍递增到这个上限。
+     *
+     * 这是对自激恢复环的硬约束：早先的恢复动作会把“上一次样本/稳定窗口/识别完成”这些
+     * 进展时间戳清零，于是下一次看门狗看到的就是“进展已经过期很久”，立刻再恢复一次——
+     * 恢复越勤，进展证据越少，判定越像故障。真机日志里整轮 35 秒没有一次识别输出，
+     * 却出现 30+ 次 KICK/REBUILD/RESET，就是这条环路。
+     */
+    const val MAX_RECOVERY_INTERVAL_MS = 5_000L
+    /** 画面里确实没有棋盘时的取帧探测间隔；这属于正常待机，不属于管线故障。 */
+    const val IDLE_FRAME_PROGRESS_KICK_MS = 1_000L
     /** Global quick probe: poke acquisition after 250ms without a normally processed sample. */
     const val FRAME_PROGRESS_KICK_MS = 250L
     /** Do not queue repeated forced acquisitions faster than the two-frame probe period. */
@@ -57,6 +68,13 @@ object PipelineHealthPolicy {
         val captureAlive: Boolean = true,
         val lastRecoveryAt: Long = 0L,
         val lastCaptureKickAt: Long = 0L,
+        /**
+         * 画面里连着识别不到任何棋子，且当前没有可用的裁剪网格：
+         * 没有任何“识别状态”需要被清掉，此时破坏性恢复只会打断正在积累的稳定窗口。
+         */
+        val noBoardIdle: Boolean = false,
+        /** 上次破坏性恢复之后，还没有任何一次识别完成的连续次数。 */
+        val recoveriesWithoutProgress: Int = 0,
         val now: Long = 0L,
     )
 
@@ -72,6 +90,22 @@ object PipelineHealthPolicy {
             return if (landingStalled(h)) Action.REBASE_LANDING else Action.NONE
         }
         if (!h.needsFrames || !h.captureAlive) return Action.NONE
+
+        // 屏幕上根本没有棋盘：没有裁剪网格、没有待确认候选，也就没有可恢复的识别状态。
+        // 这里只保活取帧（且按待机节奏），绝不 RESET_VISION/REBUILD_CAPTURE——
+        // 那只会把正在积累的稳定窗口清掉，让“没棋盘”永远变不成“有棋盘”。
+        // 唯一的例外仍是真正的取帧停摆：那时候是录屏侧坏了，必须重建。
+        if (h.noBoardIdle) {
+            if (h.lastFrameAt > 0L && h.now - h.lastFrameAt > STREAM_FRAME_STALL_MS) {
+                return if (recoveryAllowed(h)) Action.REBUILD_CAPTURE else Action.NONE
+            }
+            val idleBase = maxOf(h.lastProcessedSampleAt, h.streamStartedAt, h.captureStartedAt)
+            val idleAge = if (idleBase > 0L) h.now - idleBase else Long.MAX_VALUE
+            if (idleAge >= IDLE_FRAME_PROGRESS_KICK_MS && captureKickAllowed(h)) {
+                return Action.KICK_CAPTURE
+            }
+            return Action.NONE
+        }
 
         val pendingAge = if (h.recognitionPending && h.recognitionPendingSinceAt > 0L)
             h.now - h.recognitionPendingSinceAt else 0L
@@ -161,9 +195,20 @@ object PipelineHealthPolicy {
         return h.now - progress > LANDING_FRAME_GRACE_MS
     }
 
-    private fun recoveryAllowed(h: Health): Boolean =
-        h.lastRecoveryAt <= 0L || h.now - h.lastRecoveryAt >= MIN_RECOVERY_INTERVAL_MS
+    /** 本轮允许的最小恢复间距；连续无进展的恢复按 2 倍递增，上限见 [MAX_RECOVERY_INTERVAL_MS]。 */
+    fun recoveryIntervalMs(h: Health): Long {
+        var ms = MIN_RECOVERY_INTERVAL_MS
+        repeat(h.recoveriesWithoutProgress.coerceIn(0, 8)) {
+            ms = (ms * 2).coerceAtMost(MAX_RECOVERY_INTERVAL_MS)
+        }
+        return ms
+    }
 
-    private fun captureKickAllowed(h: Health): Boolean =
-        h.lastCaptureKickAt <= 0L || h.now - h.lastCaptureKickAt >= CAPTURE_KICK_COOLDOWN_MS
+    private fun recoveryAllowed(h: Health): Boolean =
+        h.lastRecoveryAt <= 0L || h.now - h.lastRecoveryAt >= recoveryIntervalMs(h)
+
+    private fun captureKickAllowed(h: Health): Boolean {
+        val cooldown = if (h.noBoardIdle) IDLE_FRAME_PROGRESS_KICK_MS else CAPTURE_KICK_COOLDOWN_MS
+        return h.lastCaptureKickAt <= 0L || h.now - h.lastCaptureKickAt >= cooldown
+    }
 }

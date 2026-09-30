@@ -60,4 +60,28 @@ class StableFrameWindowTest {
         assertEquals(1, next.stableCount)
         assertFalse(next.ready)
     }
+
+    @Test fun `vision-only epoch change keeps the samples already collected`() {
+        val window = StableFrameWindow()
+        repeat(5) { i -> window.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 125L) }
+        // 识别侧自愈只换锚点：代号变了，但“画面已经连续稳定”这个结论必须保留，
+        // 否则需要 1 秒积累的窗口会被每 1.5 秒一次的自愈反复打断。
+        window.adoptEpoch(2, preserveSamples = true)
+        var released = false
+        for (i in 5..7) {
+            val result = window.accept(frame(0x101010, i.toLong()), 2, 1000L + i * 125L)
+            if (i < 7) assertFalse(result.ready)
+            if (i == 7) released = result.ready
+        }
+        assertTrue("自愈不应清空已经攒够的稳定样本", released)
+    }
+
+    @Test fun `structural epoch change still clears stale samples`() {
+        val window = StableFrameWindow()
+        repeat(5) { i -> window.accept(frame(0x101010, i.toLong()), 1, 1000L + i * 125L) }
+        window.adoptEpoch(2, preserveSamples = false)
+        val result = window.accept(frame(0x101010, 5), 2, 1625L)
+        assertEquals(1, result.stableCount)
+        assertFalse(result.ready)
+    }
 }

@@ -93,6 +93,26 @@ class StableFrameWindow(
         epoch = null
     }
 
+    /**
+     * 切换到新的识别代号，并可选保留已经积累的样本。
+     *
+     * 识别侧自愈（丢弃裁剪网格、整屏重找）改变的只是“下一帧用哪个锚点推理”，
+     * 并不改变“画面已经连续稳定”这个既有结论。若在这种自愈里把窗口清空，
+     * 需要 1 秒（8×125ms）才能成立的稳定窗口就会被每 1.5 秒一次的自愈反复打断，
+     * 整轮管线一次识别都产不出来（真机日志里 `stableAge` 恒为 -1、`VISION_RAW` 为 0 的成因）。
+     */
+    @Synchronized
+    fun adoptEpoch(frameEpoch: Long, preserveSamples: Boolean) {
+        if (epoch == frameEpoch) return
+        epoch = frameEpoch
+        if (!preserveSamples || samples.isEmpty()) {
+            clearSamples()
+        } else {
+            // 保留滑动窗口，只重新打开释放闸门：下一个样本就能参与判定。
+            releasedForStableRun = false
+        }
+    }
+
     private fun isWindowStable(): Boolean {
         if (samples.size < requiredStableFrames) return false
         var previous: Sample? = null

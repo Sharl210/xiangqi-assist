@@ -44,4 +44,12 @@ class FrameStabilityPolicyTest {
         val edge = Frame(8, 8, IntArray(64) { i -> if (i % 2 == 0) 0xFFFFFFFF.toInt() else 0xFF000000.toInt() })
         assertTrue(FrameStabilityPolicy.clarityScore(edge) > FrameStabilityPolicy.clarityScore(flat))
     }
+
+    @Test fun `idle sampling period is half the active rate`() {
+        assertEquals(250L, FrameStabilityPolicy.IDLE_SAMPLE_PERIOD_MS)
+        assertFalse(FrameStabilityPolicy.shouldSample(1_249L, 1_000L, FrameStabilityPolicy.IDLE_SAMPLE_PERIOD_MS))
+        assertTrue(FrameStabilityPolicy.shouldSample(1_250L, 1_000L, FrameStabilityPolicy.IDLE_SAMPLE_PERIOD_MS))
+        // 默认周期（8fps）不受待机参数影响
+        assertTrue(FrameStabilityPolicy.shouldSample(1_125L, 1_000L))
+    }
 }

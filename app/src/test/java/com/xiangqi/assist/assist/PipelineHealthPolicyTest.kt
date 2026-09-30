@@ -29,6 +29,8 @@ class PipelineHealthPolicyTest {
         captureAlive: Boolean = true,
         lastRecoveryAt: Long = 0L,
         lastCaptureKickAt: Long = Long.MIN_VALUE,
+        noBoardIdle: Boolean = false,
+        recoveriesWithoutProgress: Int = 0,
     ) = PipelineHealthPolicy.Health(
         paused = paused,
         manualMode = manualMode,
@@ -51,6 +53,8 @@ class PipelineHealthPolicyTest {
         captureAlive = captureAlive,
         lastRecoveryAt = lastRecoveryAt,
         lastCaptureKickAt = lastCaptureKickAt,
+        noBoardIdle = noBoardIdle,
+        recoveriesWithoutProgress = recoveriesWithoutProgress,
         now = now,
     )
 
@@ -310,5 +314,73 @@ class PipelineHealthPolicyTest {
             PipelineHealthPolicy.evaluate(base(paused = true, lastProcessedSampleAt = 1L, lastFrameAt = 1L)))
         assertEquals(PipelineHealthPolicy.Action.NONE,
             PipelineHealthPolicy.evaluate(base(captureAlive = false, lastProcessedSampleAt = 1L, lastFrameAt = 1L)))
+    }
+
+    /**
+     * 这条用例锁死本轮真机日志里那个自激恢复环：屏幕上一个棋子都没有时，
+     * 破坏性恢复会把正在积累的稳定窗口清掉，于是永远停在“整轮零识别 + 反复重建”。
+     */
+    @Test fun `no board idle suppresses destructive reset that would kill the stable window`() {
+        val stalled = base(
+            now = 100_000L,
+            streamStartedAt = 95_000L,
+            captureStartedAt = 95_000L,
+            lastFrameAt = 100_000L,
+            lastStableAt = 0L,
+            lastVisionAt = 0L,
+            lastRecognitionCompletedAt = 0L,
+            lastProcessedSampleAt = 95_500L,
+        )
+        // 非待机（有棋盘但没有稳定窗口）时，这里确实是要求整屏重定位的。
+        assertEquals(PipelineHealthPolicy.Action.RESET_VISION,
+            PipelineHealthPolicy.evaluate(stalled))
+        // 待机时必须一票否决：没有任何裁剪网格可清，清掉的只会是稳定窗口进度。
+        assertEquals(PipelineHealthPolicy.Action.NONE,
+            PipelineHealthPolicy.evaluate(stalled.copy(noBoardIdle = true, lastCaptureKickAt = 100_000L)))
+    }
+
+    @Test fun `idle probe keeps the capture alive at the slower cadence`() {
+        val idle = base(
+            now = 100_000L,
+            streamStartedAt = 95_000L,
+            captureStartedAt = 95_000L,
+            lastFrameAt = 100_000L,
+            lastStableAt = 0L,
+            lastVisionAt = 0L,
+            lastRecognitionCompletedAt = 0L,
+            lastProcessedSampleAt = 95_500L,
+            noBoardIdle = true,
+            lastCaptureKickAt = 90_000L,
+        )
+        assertEquals(PipelineHealthPolicy.Action.KICK_CAPTURE,
+            PipelineHealthPolicy.evaluate(idle))
+        // 距上次探测不足待机间隔时不再补探，避免 250ms 一次的无效取帧。
+        assertEquals(PipelineHealthPolicy.Action.NONE,
+            PipelineHealthPolicy.evaluate(idle.copy(lastCaptureKickAt = 99_800L)))
+    }
+
+    @Test fun `idle still rebuilds a capture that actually died`() {
+        val dead = base(
+            now = 100_000L,
+            lastFrameAt = 99_000L,
+            lastStableAt = 0L,
+            lastVisionAt = 0L,
+            noBoardIdle = true,
+        )
+        assertEquals(PipelineHealthPolicy.Action.REBUILD_CAPTURE,
+            PipelineHealthPolicy.evaluate(dead))
+    }
+
+    @Test fun `recovery interval doubles while recoveries keep making no progress`() {
+        assertEquals(625L, PipelineHealthPolicy.MIN_RECOVERY_INTERVAL_MS)
+        assertEquals(5_000L, PipelineHealthPolicy.MAX_RECOVERY_INTERVAL_MS)
+        fun interval(n: Int) = PipelineHealthPolicy.recoveryIntervalMs(
+            PipelineHealthPolicy.Health(now = 1L, recoveriesWithoutProgress = n)
+        )
+        assertEquals(625L, interval(0))
+        assertEquals(1_250L, interval(1))
+        assertEquals(2_500L, interval(2))
+        assertEquals(5_000L, interval(3))
+        assertEquals(5_000L, interval(8))
     }
 }
