@@ -283,20 +283,47 @@ class YoloBoardDetector(
         if ((mapped == null || needsTargetedRecovery || relaxedRecovery) &&
             mapped?.cellClassConflicts.isNullOrEmpty()
         ) {
+            val rescueScale = thresholdScale.coerceIn(0.20, 1.0)
+            val rescueMarginScale = classMarginScale.coerceIn(0.20, 1.0)
             val rescue = YoloPostprocessor.decode(
                 output[0], lb, cw, ch,
-                confThreshold = if (relaxedRecovery || needsTargetedRecovery) 0.24 else CRITICAL_RECOVERY_CONF_THRESHOLD,
+                confThreshold = (CRITICAL_RECOVERY_CONF_THRESHOLD * rescueScale).coerceAtLeast(0.08),
                 aspectMin = 0.50,
                 aspectMax = 1.60,
                 sizeMinFactor = 0.40,
                 sizeMaxFactor = 2.00,
-                classMarginMin = if (relaxedRecovery) 0.01 else 0.02,
+                classMarginMin = (if (relaxedRecovery) 0.01 else 0.02) * rescueMarginScale,
             )
-            val rescueMapped = DetectionBoardMapper.map(
-                excludeDetections(shiftToFrame(rescue, cx0, cy0), exclude),
+            var rescueDetections = rescue
+            var rescueMapped = DetectionBoardMapper.map(
+                excludeDetections(shiftToFrame(rescueDetections, cx0, cy0), exclude),
                 frame.width, frame.height, anchor = anchor,
                 preferAnchor = cropHint != null && anchor != null,
             )
+            // 黑将长期漏检时，单独做一次“黑将类别”复核：只把模型对黑将类别
+            // 本身给出足够分数的框加入当前帧，绝不从上一局面补王。最终仍须通过
+            // 双王、九宫位置、同格冲突和完整棋面安全门。
+            if (!hasBlackKing(rescueMapped)) {
+                val kingOnly = YoloPostprocessor.decode(
+                    output[0], lb, cw, ch,
+                    confThreshold = (0.12 * rescueScale).coerceAtLeast(0.08),
+                    aspectMin = 0.50,
+                    aspectMax = 1.60,
+                    sizeMinFactor = 0.40,
+                    sizeMaxFactor = 2.00,
+                    classMarginMin = 0.0,
+                    forcedLabelId = YoloDetection.LABEL_BLACK_KING,
+                )
+                rescueDetections = rescueDetections + kingOnly
+                rescueMapped = DetectionBoardMapper.map(
+                    excludeDetections(shiftToFrame(rescueDetections, cx0, cy0), exclude),
+                    frame.width, frame.height, anchor = anchor,
+                    preferAnchor = cropHint != null && anchor != null,
+                )
+                if (kingOnly.isNotEmpty()) {
+                    lastDetectionSummary = "black-king-targeted-recovery=${kingOnly.size};$lastDetectionSummary"
+                }
+            }
             val strictPieceCount = mapped?.pieceCount ?: -1
             if (isSafeRecoveredBoard(rescueMapped) &&
                 rescueMapped != null && rescueMapped.pieceCount >= strictPieceCount
@@ -419,6 +446,11 @@ class YoloBoardDetector(
         val x0 = exclude[0].toDouble(); val y0 = exclude[1].toDouble()
         val x1 = exclude[2].toDouble(); val y1 = exclude[3].toDouble()
         return dets.filterNot { d -> d.cx >= x0 && d.cx <= x1 && d.cy >= y0 && d.cy <= y1 }
+    }
+
+    private fun hasBlackKing(mapped: DetectionBoardMapper.MappedBoard?): Boolean {
+        if (mapped == null) return false
+        return mapped.canonical.sumOf { row -> row.count { it == com.xiangqi.assist.gamelogic.Piece.BJIANG } } == 1
     }
 
     private fun hasBothKings(board: Array<IntArray>): Boolean {

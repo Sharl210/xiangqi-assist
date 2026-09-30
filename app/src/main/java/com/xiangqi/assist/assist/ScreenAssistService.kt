@@ -1043,6 +1043,7 @@ class ScreenAssistService : Service() {
                     noBoardIdle = noBoardIdle && sessionGrid == null && landing == null,
                     recoveriesWithoutProgress = recoveriesWithoutProgress,
                     frameStallRebuilds = frameStallRebuilds,
+                    framesSinceRebuild = framesSinceRebuild,
                     now = now,
                 )
             )
@@ -1936,6 +1937,7 @@ class ScreenAssistService : Service() {
                 try {
                     val now = System.currentTimeMillis()
                     lastStreamFrameAt = now
+                    framesSinceRebuild++
                     if (streamStartedAt <= 0L) streamStartedAt = now
                     if (FrameStabilityPolicy.shouldSample(now, lastStreamSampleAt, streamSamplePeriodMs())) {
                         lastStreamSampleAt = now

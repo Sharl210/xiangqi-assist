@@ -31,6 +31,7 @@ class PipelineHealthPolicyTest {
         lastCaptureKickAt: Long = Long.MIN_VALUE,
         noBoardIdle: Boolean = false,
         recoveriesWithoutProgress: Int = 0,
+        framesSinceRebuild: Int = 0,
     ) = PipelineHealthPolicy.Health(
         paused = paused,
         manualMode = manualMode,
@@ -55,6 +56,7 @@ class PipelineHealthPolicyTest {
         lastCaptureKickAt = lastCaptureKickAt,
         noBoardIdle = noBoardIdle,
         recoveriesWithoutProgress = recoveriesWithoutProgress,
+        framesSinceRebuild = framesSinceRebuild,
         now = now,
     )
 
@@ -402,6 +404,17 @@ class PipelineHealthPolicyTest {
         lastProcessedSampleAt = 1_000L,
         lastRecoveryAt = lastRecoveryAt,
     ).copy(recoveriesWithoutProgress = recoveriesWithoutProgress, frameStallRebuilds = frameStallRebuilds)
+
+    @Test fun `static stream with consumed frames is not rebuilt just because no new image arrives`() {
+        val action = PipelineHealthPolicy.evaluate(
+            stalledStream(now = 10_000L).copy(
+                framesSinceRebuild = 2,
+                lastProcessedSampleAt = 9_300L,
+                lastFrameAt = 9_300L,
+            )
+        )
+        assertEquals(PipelineHealthPolicy.Action.NONE, action)
+    }
 
     @Test fun `frame stall rebuilds the capture stream`() {
         assertEquals(

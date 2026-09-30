@@ -23,6 +23,23 @@ class YoloPipelineTest {
     }
 
     @Test
+    fun `forced label decode can recover a lower ranked black king candidate`() {
+        val lb = YoloPostprocessor.Letterbox.forFrame(640, 640)
+        val rows = Array(YoloPostprocessor.ANCHORS) { FloatArray(YoloPostprocessor.DIMS) }
+        val row = rows[0]
+        row[0] = 320f; row[1] = 80f; row[2] = 48f; row[3] = 48f; row[4] = 0.9f
+        row[5 + 4] = 0.70f
+        row[5 + YoloDetection.LABEL_BLACK_KING] = 0.30f
+        val dets = YoloPostprocessor.decode(
+            rows, lb, 640, 640,
+            confThreshold = 0.08,
+            classMarginMin = 0.0,
+            forcedLabelId = YoloDetection.LABEL_BLACK_KING,
+        )
+        assertEquals(1, dets.size)
+        assertEquals(YoloDetection.LABEL_BLACK_KING, dets.single().labelId)
+    }
+    @Test
     fun `real output decodes to 32 pieces plus board`() {
         val dets = decodeFixture(1080, 2400)
         // 33 真实行 + 3 重叠重复框 => NMS 后恰 33；低分噪声被阈值滤除

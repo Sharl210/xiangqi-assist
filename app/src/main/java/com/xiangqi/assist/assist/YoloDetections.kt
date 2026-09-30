@@ -28,6 +28,7 @@ class YoloDetection(
 
     companion object {
         const val LABEL_BOARD = 14
+        const val LABEL_BLACK_KING = 3
 
         // labelId 0..13 依次对应：
         // b_ma b_xiang b_shi b_jiang b_che b_pao b_bing r_che r_ma r_shi r_jiang r_xiang r_pao r_bing

@@ -581,7 +581,9 @@ def try_board(interp, di, do, frame) -> dict:
 
         # 缺王/非法落点/无棋面：低置信度救援（0.24 / margin 0.02），子数不得减少
         if info["conflicts"] == 0:
-            rescue = decode(raw, w, h, 0.24, 0.02, off)
+            rescue_conf = max(0.08, 0.24 * max(0.20, min(1.0, thresholds(level)[0] / BASE_CONF)))
+            rescue_margin = 0.02 * max(0.20, min(1.0, thresholds(level)[1] / BASE_MARGIN))
+            rescue = decode(raw, w, h, rescue_conf, rescue_margin)
             result4, info4 = attempt(rescue)
             if result4 and result4["mapped"] >= info["pieceCount"]:
                 result4["via"] = f"rescue@0.24(lv{level})"

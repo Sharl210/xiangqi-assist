@@ -1,10 +1,10 @@
 # 象棋辅助 1.3.4 逐条验收（活动文档）
 
-最近核验时间：2026-09-30 01:5x（Asia/Shanghai）
-验收回路轮次：第 3 轮
-本轮基准代码提交：`5eb2f00` + 本轮“静默放行 / 取帧重建不受退避 / 连续重建后要求重新授权”（见 R-32）
-本轮验收产物：`/workspace/dist-xqdk-local-20260930-r4/`（本机正式签名，证书与已发布正式版一致；包名 `com.xiangqi.assist`、versionName 1.3.4、versionCode 8）
-本轮定向验证：`testArmv8-DebugUnitTest` 470 项 462 通过（8 项为环境缺 Robolectric 原生库，与改动无关）
+最近核验时间：2026-09-30 03:18（Asia/Shanghai）
+验收回路轮次：第 5 轮
+本轮基准代码提交：工作树（尚未提交）；新增静止帧看门狗保护与黑将定向类别复核
+本轮验收产物：待 Release 构建完成后写入 `/workspace/dist-xqdk-local-20260930-r6/`
+本轮定向验证：`PipelineHealthPolicyTest`、`YoloPipelineTest` 通过；全量单测 472 项中 464 项通过，8 项仍为本机 Robolectric 原生库缺失
 
 ## 怎么读这份文档
 
@@ -51,7 +51,9 @@
 
 | R-32 | 第二份日志（Lite）同样是整轮零识别：`VISION_RAW` 0 次、`stableAge` 恒 -1 | 进行中 | 新增根因：录屏用的是 VirtualDisplay，**屏幕内容不变化时它不再投递新帧**，于是“连续 8 个样本”的判据在静止画面上永远无法满足，识别一次都不会发生（第二份日志里 30 秒只有约 6 帧，稳态下每次重建只回一帧）。已新增**静默放行**：最后一张样本之后静默超过 600ms 就用窗口里最后那张样本进入一次识别，超过 3 秒没有新帧则判定为取帧故障交给看门狗（不拿过期画面反复当新棋面）；两次静默放行之间至少间隔 500ms，避免同一静止画面被反复推理。另修：取帧重建不再参与指数退避（固定 625ms），连续 3 次重建仍一帧未到时改为提示用户点『继续』重新授权，不再无限重建。新增单测 5 项、策略单测 3 项。真机未复测。 | `StableFrameWindow.kt`、`PipelineHealthPolicy.kt`、`ScreenAssistService.kt` |
 
-## 整体结论
+|| R-33 | 第三份日志 Medium 已有 `VISION_RAW` 但仍不可用，且随后进入连续 `REBUILD_CAPTURE` | 进行中 | 已确认 Medium 推理正常（约 197–449ms），识别结果持续缺黑将，安全门正确拒绝 `黑将数量异常:0`；更严重的是 `framesSinceRebuild=132` 时仍把静止无新帧误判为取帧停摆，随后重建后只有 1–2 帧仍反复重建。已修：本次重建后只要收到并消费过帧，就不再按静止无新帧重建；缺王救援阈值和类别边际同步跟随每三次降档。定向单测通过，双变体 Release 已打包；真机复测未完成。 | `PipelineHealthPolicy.kt`、`YoloBoardDetector.kt`、`ScreenAssistService.kt`、`tools/verify_test_log_screenshots.py` |
+
+
 
 - 整体状态：**未通过**（不能交付）。
 - 已通过并带证据的条目：R-01、R-02、R-04、R-05、R-07、R-08、R-10、R-11、R-12、R-14、R-15、R-17、R-18、R-21、R-24、R-25、R-28、R-29、R-30。

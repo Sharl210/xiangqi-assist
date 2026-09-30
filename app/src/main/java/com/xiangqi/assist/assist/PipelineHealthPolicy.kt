@@ -91,6 +91,8 @@ object PipelineHealthPolicy {
         val recoveriesWithoutProgress: Int = 0,
         /** 连续多少次重建取帧之后仍然一帧都没收到。 */
         val frameStallRebuilds: Int = 0,
+        /** 本次取帧管线重建后已收到的原始 ImageReader 帧数。 */
+        val framesSinceRebuild: Int = 0,
         val now: Long = 0L,
     )
 
@@ -146,6 +148,9 @@ object PipelineHealthPolicy {
             return frameStallAction(h)
         }
         if (h.lastFrameAt > 0L && h.now - h.lastFrameAt > STREAM_FRAME_STALL_MS) {
+            // 静止画面可能只产生少量回调；本次管线只要已经收到过原始帧，
+            // 就不能再次按“没有新帧”重建。静默画面由稳定窗口和 capturePump 处理。
+            if (h.framesSinceRebuild > 0) return Action.NONE
             return frameStallAction(h)
         }
 

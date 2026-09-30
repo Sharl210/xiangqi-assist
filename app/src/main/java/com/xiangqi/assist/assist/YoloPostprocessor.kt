@@ -53,6 +53,8 @@ object YoloPostprocessor {
         classMarginMin: Double = 0.05,
         /** 独立棋盘框阈值；默认等于棋子阈值，仅在有界冲突复核中调低。 */
         boardConfThreshold: Double = confThreshold,
+        /** 仅输出指定类别，用于缺王定向复核；不改变普通解码类别选择。 */
+        forcedLabelId: Int? = null,
     ): List<YoloDetection> {
         data class Raw(
             val labelId: Int,
@@ -68,7 +70,7 @@ object YoloPostprocessor {
         for (i in 0 until ANCHORS) {
             val row = output[i]
             val obj = row[4].toDouble()
-            if (obj < min(confThreshold, boardConfThreshold)) continue
+            if (forcedLabelId == null && obj < min(confThreshold, boardConfThreshold)) continue
             var bestCls = -1
             var bestScore = 0.0
             val classScores = ArrayList<Pair<Int, Double>>(DIMS - 5)
@@ -77,22 +79,26 @@ object YoloPostprocessor {
                 classScores += c to s
                 if (s > bestScore) { bestScore = s; bestCls = c }
             }
-            val threshold = if (bestCls == YoloDetection.LABEL_BOARD) boardConfThreshold else confThreshold
-            if (bestCls < 0 || bestScore < threshold) continue
+            val selectedCls = forcedLabelId ?: bestCls
+            val selectedScore = if (forcedLabelId == null) bestScore else {
+                classScores.firstOrNull { it.first == forcedLabelId }?.second ?: 0.0
+            }
+            val threshold = if (selectedCls == YoloDetection.LABEL_BOARD) boardConfThreshold else confThreshold
+            if (selectedCls < 0 || selectedScore < threshold) continue
             val alternatives = classScores
                 .sortedByDescending { it.second }
                 .take(3)
-            val secondScore = classScores
+            val secondScore = if (forcedLabelId != null) 0.0 else classScores
                 .asSequence()
-                .filter { it.first != bestCls }
+                .filter { it.first != selectedCls }
                 .maxOfOrNull { it.second } ?: 0.0
-            if (bestScore - secondScore < classMarginMin) continue
+            if (selectedScore - secondScore < classMarginMin) continue
             val cx = row[0].toDouble()
             val cy = row[1].toDouble()
             val w = row[2].toDouble()
             val h = row[3].toDouble()
             raws.add(Raw(
-                bestCls, bestScore, cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2,
+                selectedCls, selectedScore, cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2,
                 alternatives,
             ))
         }
