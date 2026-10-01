@@ -645,7 +645,30 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 - [ ] 设备复测：回合不再判反、逐帧换边、等待响应变快、卡死自恢复、功耗实测。
 - [ ] 功耗优化（R-23）尚未开始，计划闭环未 PASS，不得交付。
 
-## P33 第三份 Medium 真机日志：识别已运行但被静止帧误恢复（2026-09-30）
+## P34 棋面变化检测过快与提前计算（2026-09-30）
+
+### 输入证据
+- [x] 用户新增真机反馈：等待棋面变化的轮询间隔缩短后，棋盘动画/高亮尚未结束就进入计算，导致错误棋面、错误棋子位置和错误落子；另有部分棋面仍然持续识别失败。
+- [x] 用户提供现场截图：悬浮窗已经进入“正在确认棋面 / 引擎思考中”，但棋盘仍处于明显的落子高亮状态，说明“发现变化”与“确认新棋面”没有被严格分离。
+
+### 根因
+- [x] 服务启动时将 `BoardTracker` 设置为 `confirmCount = 1`，单个识别结果即可成为新棋面。
+- [x] 等待阶段的 125ms 轮询本应只负责尽快发现变化，但现有链路缺少独立的约 2 秒新棋面确认门。
+- [x] 局面变化后的分析防抖仅 30ms，不能替代棋面稳定确认。
+
+### 实施
+- [x] 保留 125ms 等待轮询，用于发现变化和维持取帧，不把它作为新棋面采纳时间。
+- [x] 自动服务的 `BoardTracker` 改为 16 个连续一致的有效识别结果；按 8fps 采样约等于 2 秒确认期。
+- [x] 非法棋面、识别失败和不一致候选不计入确认帧；确认门通过前不更新当前局面、不启动引擎、不触发自动落子。
+- [x] 分析防抖从 30ms 调整为 100ms，仅用于合并重复确认回调，不冒充稳定期。
+
+### 验证
+- [x] `HeartbeatPolicyTest`、`FrameStabilityPolicyTest`、`AssistCoreTest` 定向测试通过。
+- [ ] 全量 JVM 测试与双变体 Release 构建待执行。
+- [ ] 真机验证：确认棋面变化后至少约 2 秒稳定，再进入引擎计算；确认动画高亮期间不更新 FEN、不下错棋。
+- [ ] 真机验证：确认仍然识别失败的棋面能继续复核，不进入永久卡死。
+
+
 
 ### 输入证据
 - [x] 用户粘贴第三份真机日志：`VISION_RAW|tier=MEDIUM` 连续出现，推理耗时约 197–449ms；因此 Medium 已成功加载并执行推理。
@@ -686,5 +709,220 @@ P1已完成日志时间线初查；P2预算/状态文案已改为由不可变预
 ### 验证
 - [x] `testArmv8-DebugUnitTest` 470 项 462 通过（8 项为环境缺 Robolectric 原生库，与改动无关）。
 - [x] 双变体 Release 打包成功；产物 `/workspace/dist-xqdk-local-20260930-r4/`（含 `SHA256SUMS.txt`），v2 证书 `f4dbd277…` 与已发布正式版一致。
-- [ ] 设备复测：需在**棋盘应用内**跑一遍，确认日志出现 `VISION_RAW tier=MEDIUM/LITE` 与 `STREAM_QUIET_RELEASE`，且 `stallRebuilds` 不再连涨。
-- [ ] 上一份日志的现场是相册应用（前台包名 `com.coloros.gallery3d`），屏幕上没有棋盘；复测时须在棋盘界面进行，否则无法判定修复效果。
+
+
+
+## P37 最新日志识别时延优化（2026-10-01）
+
+### 用户约束
+- [ ] 识别响应需要更快。
+- [ ] 允许自主协调稳定确认、采样、重复复核和识别内部时序，但必须保留正确性安全门。
+- [ ] 不得修改随机时间、反作弊时间间隔、预选落子间隔和正式落子时序。
+
+### 最新日志证据
+- [ ] 已读取 `/workspace/测试log/10月1号。/assist.log`，需要完成完整时延分解：稳定窗口、模型推理、同格复核、棋面确认、分析启动。
+- [ ] 需要区分识别真实耗时与用户感知耗时，不能只看 `infer=...ms`。
+
+- [x] 已完成首轮识别时延分解：最新日志 `VISION_RAW` 平均推理约53ms，首次从开始到首个模型结果约1.7s，主要成本来自4帧前置窗口、确认候选和重复冲突复核；随机/反作弊/预选/正式落子时序保持不变。
+- [x] 识别专用稳定窗口由默认8帧调整为4帧（约500ms）；前台切换确认仍保持8帧。
+- [x] 正常棋面确认由8次调整为3次；合法一步变化仍可由策略缩短到2次，类别纯变化保持长确认。
+- [x] 分析防抖由100ms调整为50ms，仅减少棋面确认后的空等，不改变落子和反作弊时序。
+- [ ] 真机复测：确认识别响应变快，且动画/高亮、冲突类别和错误棋面不会提前进入计算。
+
+### 证据
+- [x] Medium 已正常加载并持续推理，日志出现 `VISION_RAW tier=MEDIUM`，推理耗时约 297–851ms。
+- [x] 棋盘定位与大部分棋子检测稳定，重复出现 `raw=34 pieces=33 mapped=32`。
+- [x] 失败固定在同一格 `r=9,c=8`，候选为 `piece=5/6`，强候选约 0.80、弱候选约 0.53–0.56。
+- [x] 全屏复核仍得到相同冲突；连续降阈值到 0.16 后仍无变化；会话最终没有 `BOARD_CONFIRMED`。
+
+### 修复
+- [x] 增加有界同阵营强弱冲突策略：仅当强候选达到 0.70、弱候选不高于 0.60、分差至少 0.18 时才尝试移除弱候选。
+- [x] 移除弱候选后重新做棋盘映射、双王、结构与安全门检查；不满足则继续拒绝，不按分数强行接受。
+- [x] 补充 `DetectionConflictPolicyTest`，覆盖可消解、分差不足、异阵营不可按分数消解三类情况。
+
+### 验证与边界
+- [x] `DetectionConflictPolicyTest`、`YoloPipelineTest`、`DetectionBoardMapperTest`、`PipelineHealthPolicyTest`、`AssistCoreTest` 定向测试通过。
+- [x] 本轮双变体 Release 构建完成：`assembleArmv8-Release`、`assembleArmv8-dotprod-Release`，结果 `BUILD SUCCESSFUL`；产物：`app/build/outputs/apk/armv8-/release/XiangqiAssist_20261001_8_armv8-Release.apk`、`app/build/outputs/apk/armv8-dotprod-/release/XiangqiAssist_20261001_8_armv8-dotprod-Release.apk`。
+- [ ] 真机需确认该类固定冲突可以进入 `BOARD_CONFIRMED`，且没有把错误类别提交为棋面。
+- [ ] 真机需继续验证 Lite、其他皮肤、其他冲突类型和全部失败截图。
+
+### 用户原始要求
+- [ ] 整体审查 XQDK 项目。
+- [ ] 针对经常性的盘面识别失败，完成全链路定位与修复。
+- [ ] 不能只修局部现象；需要覆盖取帧、稳定窗口、模型推理、后处理、网格映射、棋面安全门、状态机、引擎计算、自动落子和失败恢复。
+
+### 审查范围
+- [ ] 保全当前工作树和既有真机日志，不覆盖用户原始日志、截图与已发布版本。
+- [ ] 建立“屏幕帧 → 稳定样本 → 模型输出 → 棋盘映射 → 结构校验 → 棋面确认 → 引擎分析 → 落子核对 → 恢复”的可追踪事件链。
+- [ ] 审查 Medium/Lite 两档真实 Android 生产链与主机复刻链是否存在分叉。
+- [ ] 审查异常棋面被拒绝后是否会持续复核，是否会被看门狗/恢复逻辑反复清空而卡死。
+- [ ] 审查自动修正、阈值降级、同格冲突、缺王定向复核和历史锚点复用是否可能接受错误棋面或误伤正确棋面。
+- [ ] 审查确认时间、回合判定、引擎启动和自动落子之间是否存在竞态或过期快照。
+
+### 执行与证据
+- [x] 先完成只读代码与日志审查，形成根因清单和优先级；未经证据不改模型阈值或安全门。
+- [x] 对已确认根因做最小必要完整修复，并补纯 JVM 回归测试或可重放样本。
+- [x] 最新真机日志固定冲突已建立取证文档：`docs/evidence/latest-log-20261001-fixed-conflict.md`。
+- [x] 运行相关定向测试：`DetectionConflictPolicyTest`、`YoloPipelineTest`、`DetectionBoardMapperTest`、`PipelineHealthPolicyTest`、`AssistCoreTest`，结果 `BUILD SUCCESSFUL`。
+- [x] 运行双变体 Release 构建：`assembleArmv8-Release`、`assembleArmv8-dotprod-Release`，结果 `BUILD SUCCESSFUL`。
+- [ ] 运行可运行的全量测试、资源/产物复读与本轮新包签名复核。
+- [ ] 真机未提供新日志前，不把主机通过或构建成功写成真机识别已修好；需要用户设备复测的项逐条保留。
+- [ ] 只有全链路证据闭合后，才允许进入发布验收；此前保持进行中，不声明交付完成。
+
+## P38 兜底「计算中」死锁修复（2026-10-01 下午，复测日志）
+
+用户提供的是设备端实时日志 `/data/user/0/com.xiangqi.assist/files/logs/assist.log`
+（241,716 字节，最后写入 `2026-10-01T16:50:43+08:00`，会话约 5 分 41 秒）。
+用户同时明确约束：**日志到手即为修复指令，不得以征询意见替代动手（此后长期有效）**。
+
+### 需求落盘
+- [x] 用户原文已逐条追加到 `request.md` 对应章节。
+
+### 上一轮修复的真机结论
+- [x] 「同格冲突容忍」真机生效：`BOARD_CONFIRMED` 9 次、`VISION_REJECT` 7 次、
+      `VISION_CONFLICT_TOLERATED` 6 次、自动落子 11 步、`RESET_GRID` 0 次。
+- [x] 修前对照：`BOARD_CONFIRMED` 3 次（全在开头）、`VISION_REJECT` 111 次仍在涨、
+      卡在 `FINDING` 103 秒、每 10 秒一次 `RESET_GRID`。
+
+### 本轮新故障与根因
+- [x] 定位：`LANDING_REBASE_FALLBACK streak=3 accepted=true` 后进入兜底 `THINKING`，
+      随后约 238 秒零 `VISION_RAW`、零 `PHASE`、零看门狗动作、零取帧重建。
+- [x] 根因一：`AssistPhase.needsBoard(THINKING)` 原为 `false` → `capture()` 为 `OFF`
+      → 一进兜底态就停止取帧与识别。
+- [x] 根因二：`requestWatchdog()` 续期条件（`needsBoard || searching || 引擎未就绪`）
+      在「THINKING 且未搜索」时全为假 → 看门狗停止续期，监督链一起断。
+- [x] 两者叠加成闭环：不取帧 → 识别不产出 → 棋面无法确认 → 分析永不发起 → 阶段永不变化。
+
+### 修复
+- [x] `AssistPhase.needsBoard(phase, engineSearching)`：`THINKING` 按「是否真的在搜索」区分，
+      真搜索不读盘、兜底态必须读盘。
+- [x] `AssistPhase.capture(phase, autoMode, engineSearching)`：兜底态自动模式 `CONTINUOUS`、
+      半自动 `ON_DEMAND`。
+- [x] 新增 `WatchdogAction.RESTART_ANALYSIS` 与 `THINKING_STALL_TIMEOUT_MS = 3_000L`：
+      兜底态干等超时即作废该局面的分析周期并重新发起（逃生通道）。
+- [x] `AssistPhase.watchdog(..., engineSearching)`：真搜索不被误判为干等，
+      也不因长考期间画面陈旧而重置网格。
+- [x] 服务侧统一口径：`desiredCaptureDemand`、`capturePump`、`tickWatchdog`、
+      `requestWatchdog`、状态行「未取帧/画面中断」提示全部传入真实 `searching`。
+- [x] `tickWatchdog` 内新增 `syncCaptureDemand(p)`，取帧档位不再停留在旧阶段。
+- [x] `RESTART_ANALYSIS` 处置：`analysisCycleGate.invalidate()` → 重新发起分析 →
+      触发自动驱动，并打 `WATCHDOG_RESTART_ANALYSIS` 供真机核对。
+
+### 验证与边界
+- [x] 定向测试通过：`AssistPhaseTest`、`AssistCoreTest`、`PipelineHealthPolicyTest`、
+      `FrameStabilityPolicyTest`、`HeartbeatPolicyTest`。
+- [x] 新增回归测试 3 项：兜底 `THINKING` 必须读盘；兜底干等超时必须被 `RESTART_ANALYSIS`
+      释放且刚进入不得抢跑；真搜索再久不得被判成干等、不得因画面陈旧重置网格。
+- [x] 全量单测 493 项、8 项失败，全部为本机缺 Robolectric 原生库
+      `conscrypt_openjdk_jni-linux-aarch_64` 的环境问题，与本轮改动无关。
+- [x] 双变体 Release 构建通过，签名证书 SHA-256
+      `f4dbd277973ca30798b84109735c2bc976afd177f87d361bc95574e781372dee`（与正式版一致）。
+- [x] 取证文档：`docs/evidence/recognition-thinking-deadlock-20261001.md`。
+- [ ] 真机复测：兜底态应继续出现 `VISION_RAW`；确实干等时应出现
+      `WATCHDOG_RESTART_ANALYSIS` 且随后真的开始计算；长考期间不得出现该标记。
+- [ ] 真机复测：长考期间状态行不得出现「未取帧」「画面已中断」这类误导文案。
+- [ ] 尚未验证：Lite 模型、其他皮肤、全部失败截图的真机逐张通过。
+
+## P38 同格类别冲突「胜负明确即放行」（2026-10-01 设备端日志）
+
+### 根因
+- [x] 设备端 `assist.log`（408095 字节，最后写入 2026-10-01T15:48:52）只有一个会话：一键准备 → 开始 → 更新棋谱 → 重置棋盘 → 一键关闭，约 3 分 11 秒。
+- [x] 全会话只有 3 次 `BOARD_CONFIRMED`，全在开头 3 秒；自 `1790840798202` 起进入无限 `VISION_REJECT reason=当前画面存在同格类别冲突`，`misses` 累计到 111，`WATCHDOG_ACTION action=RESET_GRID` 每 10 秒一次、`phaseAge` 堆到 103425ms，116 秒内没有一次棋面确认。
+- [x] 冲突格固定 `r=9,c=8`（屏幕右下 = 红方底线最右 i0）；冲突对固定 `piece=5/6`（红车/红炮），分数约 `0.708/0.684`，分差约 0.024；该局面 i0 的正确类别就是红车。
+- [x] `DetectionBoardMapper.map` 用「高分占位、低分丢弃」解决同格冲突，故 `mapped.screenRaw` 已经是胜出候选；但 `ScreenAssistService.recognizeFrame` 只要冲突列表非空就整帧 `return null`，把已经正确的结果永久否决。
+- [x] 三条恢复链均无效：降阈值针对漏检而非类别竞争（`level=4 conf=0.16` 无变化）；`VISION_FULL_RECHECK` 与裁剪路径几何一致、结果逐字相同；`RESET_GRID` 重建后观测方式不变。
+
+### 修复
+- [x] 新增 `DetectionConflictTolerancePolicy`：分差 ≥ 0.02、胜出候选 ≥ 0.50、且 `screenRaw` 该格确实落在胜出候选上，才判定该冲突可容忍。
+- [x] `recognizeFrame` 改为：全部冲突可容忍 且 双王齐全 且 `AssistBoard.validate` 为空 且 `invalidPiecePlacement` 为 null 时放行，并打 `VISION_CONFLICT_TOLERATED`；任一条不满足保持原拒绝行为。
+- [x] 不放宽任何棋面安全门、不改写类别；模糊僵局（分差 < 0.02）继续拒绝。
+- [x] 新增 `DetectionConflictTolerancePolicyTest` 8 项断言：真机场景、候选顺序颠倒、模糊僵局、最终格被改写、最终格为空、低置信度胜者、分差边界、越界坐标。
+
+### 验证与边界
+- [x] 定向测试 `DetectionConflictTolerancePolicyTest`、`DetectionConflictPolicyTest`、`PipelineHealthPolicyTest`、`AssistCoreTest`、`DetectionBoardMapperTest`、`YoloPipelineTest` 通过（`BUILD SUCCESSFUL`）。
+- [x] 双变体 Release 构建成功：`assembleArmv8-Release`、`assembleArmv8-dotprod-Release`。
+- [x] 取证记录：`docs/evidence/recognition-conflict-tolerance-20261001.md`。
+- [ ] 真机需确认 `VISION_CONFLICT_TOLERATED` 出现且 `BOARD_CONFIRMED` 恢复。
+- [ ] 真机需确认提交类别正确（i0 应为红车），且不再出现 100 秒以上卡死。
+- [ ] 真机需继续验证 Lite、其他皮肤与全部失败截图。
+
+---
+
+## P39｜识别提速至 1/2 且精度提高（2026-10-01 傍晚）
+
+### 目标
+- [ ] 棋面识别精准度高于当前版本。
+- [ ] 识别与处理的整体耗时降到当前版本的 1/2。
+
+### 取证
+- [x] 设备端 `assist.log`（1711844 字节，最后写入 2026-10-01T18:07:22）单会话 `一键准备 → 开始 → 一键关闭`。
+- [x] 上一轮修复真机生效：`BOARD_CONFIRMED` 由 3 次升到 100+ 次，`VISION_REJECT` 由 111 次降到 10 次，`VISION_CONFLICT_TOLERATED` 出现 5 次，`RESET_GRID` 为 0，自动落子连续 100+ 步。
+- [x] 时间分解确认瓶颈是推理次数而非采样时钟：采样 8fps（125ms）、稳定窗口 4 帧、确认 3 帧；每次释放稳定窗口跑一次模型推理，真机 Medium 单帧推理实测 291–851ms（均值约 500ms），3 帧 ≈ 1.5 秒，与实测「对手落子 → 我方确认」1.1–1.5 秒吻合。
+- [x] `FULL_VISION_RECHECK` 每 1800ms 还插入一次整屏推理，日志中整屏与裁剪结果约各占一半，推理预算被重复结论分走。
+
+### 提速
+- [x] 普通确认帧数 3 → 2（每帧 = 一次推理 ≈ 0.5 秒，帧数即延迟倍数）。
+- [x] 识别稳定窗口 4 → 3 帧（500ms → 375ms）。
+- [x] 整屏复核基础间隔 1800ms → 3000ms，自适上限 5400ms → 9000ms。
+- [x] 类别纯变化确认窗口 8 帧（≈4 秒）→ 4 帧（≈2 秒）。
+- [x] 预期：每回合推理次数 3 → 2，整屏推理占比减半，确认延迟约 1.5 秒 → 0.7–0.8 秒。
+
+### 提精度
+- [x] 接上此前从未被调用的 `PieceIdentityPolicy.repairMovedPiece`：终点被误读成同色另一棋子时用起点原类别还原，并经规则引擎验证确为一步合法着法后才采纳。
+- [x] `BoardTracker` 候选匹配收紧为与首盘同口径的 `compatibleWithinTolerance`：容差只吸收占用格差异，不再把「同格换汉字」当成同一候选。
+- [x] 快慢由证据决定：仅能被规则证明的一步合法着法走 2 帧快通道，不能证明的仍走普通门，可疑的「只换类别」仍要求 4 帧。
+
+### 验证与边界
+- [x] 新增回归断言 4 组：规则可证走子比不可证变化早一帧确认；类别纯变化窗口有上界；终点误读仅在规则接受时才修复；类别抖动绝不被容差吸收。
+- [x] 定向测试 11 个类全部通过；全量 497 项中 8 项为本机缺 Robolectric 原生库的环境失败。
+- [x] 双变体 Release 构建成功，证书 `f4dbd277…` 与正式版一致。
+- [x] 取证记录：`docs/evidence/recognition-latency-and-accuracy-20261001.md`。
+- [ ] 真机核对 `BOARD_CONFIRMED → ANALYSIS_REQUEST` 间隔是否真的降到约一半。
+- [ ] 真机确认动画/高亮期间仍不会提前计算；若出现「动画未结束就算棋」，优先回退稳定窗口帧数而非确认帧数。
+- [ ] 真机确认棋盘整体位移时 1 秒兜底整屏复核仍有效。
+
+## P40 真机复测：识别静默 81 秒与非法棋面空转（2026-10-01 夜）
+
+### 本轮日志事实（设备端 `assist.log`，1,467,840 字节，最后写入 18:44:27）
+- [x] 单会话约 11 分 25 秒；`BOARD_CONFIRMED` **88 次**、`VISION_REJECT` 40+ 次、
+  `PIPELINE_WATCHDOG_ACTION` 8 次、`VISION_THRESHOLD_STEP` 11 次。
+- [x] 确认本轮装的是提速/提精度版：`VISION_RESULT ... stable=3`，并有合法着法快通道的 `stable=2`。
+- [x] 时延实测：`BOARD_CONFIRMED → ANALYSIS_REQUEST` = **51ms**（上一版 100–103ms）；
+  一次确认只需 **2 次推理**、约 **602ms**（上一版 3 次、约 1.5 秒）。
+- [x] `STREAM_QUIET_RELEASE` 全会话仅 1 次，且末尾出现 **81 秒零 `VISION_RAW`**，
+  同期 `framesSinceRebuild` 仍在增长（帧没有断）。
+
+### 根因
+- [x] 根因一（识别静默）：`StableFrameWindow.releaseWhenQuiet` 开头的
+  `if (releasedForStableRun) return` 让闸门一旦关闭就再无出路；而 `SAME_BOARD` 分支
+  只调 `resetVisionRecoveryAfterAccepted()`、**从不 `rearm()`**，屏幕静止时既没有新样本、
+  静默放行又被自己挡住。附带损害：看门狗据此误判成取帧故障，每 10 秒 `RESET_GRID` 一次，
+  丢掉已对好的棋盘网格锚点，使下一次识别退化为整屏重找（`anchor=BOARD_BOX`、506ms，
+  健康态是 `PREVIOUS_GRID`、约 300ms）——既拖慢又拉低准确率。
+- [x] 根因二（非法棋面空转）：`scheduleAnalysis` 的送引擎自检
+  `AssistBoard.engineUnsafeReason` 失败后只 `notifyBoardProblem` 就返回，**不清掉已被采纳的棋面**；
+  局面与轮次都不变，下一次分析又被同一道自检挡回，`THINKING` 是兜底出口，于是永久停在"计算中"。
+  真机表现为 13 秒内 25 条 `WATCHDOG_RESTART_ANALYSIS`、每次都跟着 `ANALYSIS_SCHEDULE`，
+  却始终没有一条 `ANALYSIS_REQUEST`。
+
+### 修复
+- [x] `StableFrameWindow` 新增饿死放行（`starvationReleaseMs = 2500`）：超时未放行即强制放行
+  最新样本一次，闸门关闭时的静默巡检按 2.5 秒限速、闸门开启时的重试仍按 500ms，
+  安全门（双王/结构/位置/合法着法/多帧确认）一律不动。
+- [x] 新增 `ScreenAssistService.abandonUnsafeBoard`：送引擎自检失败时整体作废该棋面并退回识盘；
+  连续 2 次作废时额外丢弃裁剪锚点回整屏重找。
+- [x] 新增 `ThinkingRestartPolicy`：兜底"计算中"改为限速 1.5 秒重试 → 最多 3 次 →
+  用尽后作废局面回识盘；`AssistPhase.THINKING_STALL_TIMEOUT_MS` 改为引用该策略，避免常量分叉。
+
+### 验证与边界
+- [x] 新增回归断言：`StableFrameWindowTest` 3 项（确认后不 rearm 仍须周期复核、持续变化画面须饿死放行、
+  空窗口不得放行）、`ThinkingRestartPolicyTest` 5 项（限速、用尽放弃、放弃不压过限速、常量一致）。
+- [x] 定向测试 10 个类通过；全量 505 项中 8 项为本机缺 Robolectric 原生库的环境失败，无逻辑失败。
+- [x] 双变体 Release 构建成功，证书 `f4dbd277…` 与正式版一致。
+- [x] 取证记录：`docs/evidence/recognition-silence-and-unsafe-board-20261001.md`。
+- [ ] 真机确认静止局面下不再出现 10 秒以上无 `VISION_RAW` 的空档。
+- [ ] 真机确认 `RESET_GRID` 不再因"画面没有变化"误触发。
+- [ ] 真机确认非法棋面会打 `BOARD_ABANDONED_UNSAFE` 并退回 `FINDING`；
+  兜底"计算中"最多重试 3 次后转 `WATCHDOG_RESTART_ANALYSIS_GIVEUP`。
+- [ ] 真机确认提速成果保持（`BOARD_CONFIRMED → ANALYSIS_REQUEST` 仍约 50ms）且功耗未回升。
+

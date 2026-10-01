@@ -32,6 +32,7 @@ class PipelineHealthPolicyTest {
         noBoardIdle: Boolean = false,
         recoveriesWithoutProgress: Int = 0,
         framesSinceRebuild: Int = 0,
+        waitingForBoardChange: Boolean = false,
     ) = PipelineHealthPolicy.Health(
         paused = paused,
         manualMode = manualMode,
@@ -57,6 +58,7 @@ class PipelineHealthPolicyTest {
         noBoardIdle = noBoardIdle,
         recoveriesWithoutProgress = recoveriesWithoutProgress,
         framesSinceRebuild = framesSinceRebuild,
+        waitingForBoardChange = waitingForBoardChange,
         now = now,
     )
 
@@ -186,6 +188,20 @@ class PipelineHealthPolicyTest {
             lastProcessedSampleAt = now,
         )
         assertEquals(PipelineHealthPolicy.Action.NONE, PipelineHealthPolicy.evaluate(h))
+    }
+    @Test fun `waiting with an already confirmed board does not reset vision just because no new board was committed`() {
+        val now = 100_000L
+        val waiting = base(
+            now = now,
+            lastFrameAt = now,
+            lastProcessedSampleAt = now,
+            lastStableAt = now - 10_000L,
+            lastVisionAt = now - 9_000L,
+            lastRecognitionCompletedAt = now - 9_000L,
+            lastCaptureKickAt = now,
+            waitingForBoardChange = true,
+        )
+        assertEquals(PipelineHealthPolicy.Action.NONE, PipelineHealthPolicy.evaluate(waiting))
     }
     @Test fun `stable and vision stalls recover after their halved deadlines`() {
         val start = 100_000L
@@ -416,6 +432,15 @@ class PipelineHealthPolicyTest {
         assertEquals(PipelineHealthPolicy.Action.NONE, action)
     }
 
+    @Test fun `a stream that received one frame but then exceeds quiet grace is rebuilt`() {
+        val now = 100_000L
+        val stalled = stalledStream(now = now).copy(
+            framesSinceRebuild = 1,
+            lastFrameAt = now - PipelineHealthPolicy.STATIC_STREAM_GRACE_MS - 1L,
+            lastProcessedSampleAt = now - PipelineHealthPolicy.STATIC_STREAM_GRACE_MS - 1L,
+        )
+        assertEquals(PipelineHealthPolicy.Action.REBUILD_CAPTURE, PipelineHealthPolicy.evaluate(stalled))
+    }
     @Test fun `frame stall rebuilds the capture stream`() {
         assertEquals(
             PipelineHealthPolicy.Action.REBUILD_CAPTURE,

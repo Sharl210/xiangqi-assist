@@ -61,6 +61,51 @@ class StableFrameWindowTest {
         assertFalse(next.ready)
     }
 
+    // ==================== 真机 2026-10-01：静止/持续变化画面下的识别静默 ====================
+
+    @Test fun `accepted board without rearm is still re-checked while the screen stays static`() {
+        // 真机现象：一次棋面确认通过（跟 SAME_BOARD 一样不再 rearm）之后，屏幕静止、
+        // VirtualDisplay 不再投递新帧，释放闸门就一直关着——整整 81 秒没有一次 VISION_RAW，
+        // 看门狗每 10 秒误报一次"长时间未识别到棋盘"，把已经对好的棋盘网格反复丢弃。
+        // 现在闸门关着也要按饿死间隔巡检，识别不会永久静默。
+        val window = StableFrameWindow(requiredStableFrames = 3)
+        val still = frame(0x101010, 0)
+        assertFalse(window.accept(still, 1, 1000L).ready)
+        assertFalse(window.accept(still, 1, 1125L).ready)
+        assertTrue(window.accept(still, 1, 1250L).ready)
+        // 故意不 rearm：这就是"确认通过之后没有新变化"的真实状态。
+
+        assertFalse("静默不足 600ms 不得再放行", window.releaseWhenQuiet(1_400L).ready)
+        assertFalse("闸门关着时必须按饿死间隔限速", window.releaseWhenQuiet(2_000L).ready)
+        assertFalse("距上次放行 750ms，仍不应巡检", window.releaseWhenQuiet(2_400L).ready)
+        val recheck = window.releaseWhenQuiet(3_800L)
+        assertTrue("静止画面也必须被周期性复核，不能永久静默", recheck.ready)
+        assertTrue(recheck.selected === still)
+    }
+
+    @Test fun `permanently changing screen still produces a starvation release`() {
+        // 真机另一条路径：对局里的计时、动画、光影让稳定窗口永远闭合，
+        // accept() 一次都不会 ready；若没有饿死放行，识别同样会彻底静默。
+        val window = StableFrameWindow(requiredStableFrames = 3)
+        var t = 1000L
+        repeat(12) { i ->
+            val color = if (i % 2 == 0) 0x101010 else 0xFFFFFF
+            assertFalse(window.accept(frame(color, i.toLong()), 1, t).ready)
+            t += 125L
+        }
+        assertFalse("饿死间隔未到不得放行", window.releaseWhenQuiet(2_000L).ready)
+        val starved = window.releaseWhenQuiet(3_600L)
+        assertTrue("画面一直不稳定也必须放行一次，否则识别永远不产出", starved.ready)
+        assertNotNull(starved.selected)
+    }
+
+    @Test fun `starvation release is no-op on an empty window`() {
+        val window = StableFrameWindow(requiredStableFrames = 3)
+        assertFalse(window.releaseWhenQuiet(9_999L).ready)
+        assertFalse(window.releaseWhenQuiet(99_999L).ready)
+        assertEquals(0, window.sampleCount())
+    }
+
     @Test fun `static screen is released without waiting for eight frames`() {
         // VirtualDisplay 在画面静止时不再投递新帧，八个样本永远凑不齐。
         val window = StableFrameWindow()

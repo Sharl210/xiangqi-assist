@@ -68,9 +68,10 @@ class ScreenAssistService : Service() {
         const val EXTRA_REQUEST_CAPTURE_RESUME = "request_capture_resume"
         private const val CHANNEL_ID = "assist_foreground"
         private const val NOTIF_ID = 1001
-        /** 录屏流采样周期与稳定门限由策略统一提供：每秒8个样本，连续8个样本稳定后只挑一帧送入模型。 */
         private const val STREAM_SAMPLE_PERIOD_MS = FrameStabilityPolicy.SAMPLE_PERIOD_MS
-        private const val STREAM_STABLE_FRAME_COUNT = FrameStabilityPolicy.REQUIRED_STABLE_FRAMES
+        /** 识别专用稳定窗口：3×125ms≈375ms；前台切换确认仍独立使用8帧。 */
+        private const val VISION_STABLE_FRAME_COUNT = 3
+        private const val STREAM_STABLE_FRAME_COUNT = VISION_STABLE_FRAME_COUNT
         /** 蓝色候选箭头的起点预选切换目标时，每次随机等待 1250–2500ms。 */
         private const val CANDIDATE_PREVIEW_MIN_GAP_MS = CandidatePreviewPolicy.MIN_PREVIEW_SWITCH_GAP_MS
         /** 落子前提前把悬浮窗调透明的时间（避免点击动作按到悬浮窗上） */
@@ -82,6 +83,16 @@ class ScreenAssistService : Service() {
         private const val AUTO_TAP_GAP_BASE_MS = MoveTimingPolicy.DEFAULT_TAP_GAP_MS
         /** 手势完成后给棋盘动画留出的恢复缓冲。 */
         private const val AUTO_TAP_RESTORE_MS = 200L
+        /**
+         * 普通棋面确认帧数。
+         *
+         * 真机上每次确认都要跑一次模型推理（Medium 实测约 0.3–0.7 秒），帧数直接等于延迟倍数，
+         * 所以这里从 3 收到 2。安全性不靠"多跑一次同样的推理"来买，而是靠两件事补回：
+         * 1. 能由规则引擎证明的"一步合法着法"才允许走 2 帧（[PieceIdentityPolicy.requiredFrames]）；
+         * 2. 归位类别错误先经 [PieceIdentityPolicy.repairMovedPiece] 用起点原类别还原并由规则验证；
+         * 3. 可疑的"只换类别、占用格不变"变化仍然要求 4 帧。
+         */
+        private const val BOARD_CONFIRM_FRAMES = 2
         /** 建议成熟阈值：最佳着法连续未变化的时长，超过即视为"定着"（绿箭头） */
         private const val SUGGEST_STABLE_MS = 1200L
         /**
@@ -134,10 +145,10 @@ class ScreenAssistService : Service() {
         private const val LANDING_REBASE_TIMEOUT_MS = 15_000L
 
         /**
-         * 局面变化后的分析防抖窗口：只用来合并同一瞬间的重复提交，
-         * 不能变成“为了看起来稳”的固定等待（旧值 125ms 只是采样间隔，不是额外等待）。
+         * 局面变化后的分析防抖只合并同一确认事件的重复回调；真正的约2秒棋面稳定确认
+         * 由 BoardTracker.confirmCount 完成，不能把这里当作稳定期替代品。
          */
-        private const val BOARD_CHANGE_DEBOUNCE_MS = 30L
+        private const val BOARD_CHANGE_DEBOUNCE_MS = 50L
 
         /** 内部通道恢复线程的硬超时；超时必须释放状态机，不能等用户暂停。 */
         private const val CHANNEL_RESTART_TIMEOUT_MS = 12_000L
@@ -148,14 +159,28 @@ class ScreenAssistService : Service() {
          */
         private const val OUR_LANDING_BACKING_MS = 2_500L
 
-        /** 每隔一段时间用整屏模型独立复核，防止局部裁剪在棋盘移动后自锁。 */
-        private const val FULL_VISION_RECHECK_MS = 1800L
+        /** 裁剪识别出现冲突/缺王时，允许一次有界整屏复核的最小间隔。 */
+        private const val CROP_FAILURE_FULL_RECHECK_MS = 1_000L
+
+        /**
+         * 每隔一段时间用整屏模型独立复核，防止局部裁剪在棋盘移动后自锁。
+         *
+         * 2026-10-01：整屏复核本身也是一次完整推理（真机约 0.3–0.7 秒），而它与裁剪识别
+         * 争的是同一条推理链。真机日志里"整屏结果 / 裁剪结果"几乎一半一半，等于把有限的推理
+         * 预算分了一半去重复已经得到的结论。锚点健康时把基础间隔从 1.8 秒放宽到 3 秒；
+         * 棋盘一旦真的移动，裁剪识别会先失败，那时由 [CROP_FAILURE_FULL_RECHECK_MS]
+         * （1 秒）立即触发整屏复核，安全网不缩水。
+         */
+        private const val FULL_VISION_RECHECK_MS = 3000L
+
+        /** 连续这么多次"采纳之后才发现局面非法"，就丢弃裁剪锚点回整屏重找。 */
+        private const val UNSAFE_BOARD_GRID_RESET_STREAK = 2
 
         /**
          * 静默放行的最大容忍时长：画面超过这段时间没有任何新帧，就不再当作“静止画面”，
          * 而是当作取帧链路故障，交给看门狗重建，避免拿过期画面反复当新棋面。
          */
-        private const val QUIET_RELEASE_MAX_FRAME_AGE_MS = 3_000L
+        private const val QUIET_RELEASE_MAX_FRAME_AGE_MS = PipelineHealthPolicy.STATIC_STREAM_GRACE_MS
         /**
          * 整屏复核的自适应上限。
          *
@@ -163,8 +188,8 @@ class ScreenAssistService : Service() {
          * 此时把整屏复核的间隔逐步放宽，省掉那些“为安全而付出、却每次结论都一样”的整屏推理。
          * 任何一次拒绝或锚点丢失立刻回到 [FULL_VISION_RECHECK_MS]，安全网不缩水。
          */
-        private const val FULL_VISION_RECHECK_MAX_MS = 5_400L
-        private const val FULL_VISION_RECHECK_BONUS_MS = 1800L
+        private const val FULL_VISION_RECHECK_MAX_MS = 9_000L
+        private const val FULL_VISION_RECHECK_BONUS_MS = 3_000L
         /** 每连续多少次稳定通过，才放宽一级整屏复核间隔。 */
         private const val FULL_VISION_RECHECK_STEP_HITS = 8
         /** 连续录屏输出的最长边；模型只需640输入，降低全屏拷贝和内存压力。 */
@@ -709,8 +734,8 @@ class ScreenAssistService : Service() {
     private val captureHandler = Handler(captureThread.looper)
     private val mainHandler = Handler(android.os.Looper.getMainLooper())
 
-    /** 连续录屏流中的稳定关键帧窗口；仅在captureHandler线程驱动。 */
-    private val stableFrameWindow = StableFrameWindow()
+    /** 连续录屏流中的稳定关键帧窗口；识别专用窗口使用较短门，冲突/类别变化仍由后续安全门加长确认。 */
+    private val stableFrameWindow = StableFrameWindow(requiredStableFrames = VISION_STABLE_FRAME_COUNT)
 
     @Volatile private var lastStreamSampleAt = Long.MIN_VALUE
     @Volatile private var stableFrameAt = 0L
@@ -1044,6 +1069,9 @@ class ScreenAssistService : Service() {
                     recoveriesWithoutProgress = recoveriesWithoutProgress,
                     frameStallRebuilds = frameStallRebuilds,
                     framesSinceRebuild = framesSinceRebuild,
+                    waitingForBoardChange = refreshPhase() == AssistPhase.Phase.WAITING &&
+                        currentCanonical != null && landing == null &&
+                        !recognitionInFlight.get() && pendingRecognitionAt <= 0L,
                     now = now,
                 )
             )
@@ -1365,6 +1393,7 @@ class ScreenAssistService : Service() {
 
     /** 最近一次独立全屏复核的时刻；周期复核不依赖上一局面类别。 */
     @Volatile private var lastFullVisionCheckAt = 0L
+    @Volatile private var lastCropFailureFullRecheckAt = 0L
     /** 当前框选层；只在用户调整识别范围时短暂存在，不参与识别。 */
     private var boardRegionOverlay: com.xiangqi.assist.assist.ui.BoardRegionOverlayView? = null
     private var boardRegionOverlayParams: WindowManager.LayoutParams? = null
@@ -1374,6 +1403,13 @@ class ScreenAssistService : Service() {
     private val previewSnapshot = PreviewBoardSnapshot()
     /** TFLite模型选择/关闭时的识别代号，关闭后所有在途帧只允许收尾不再推理。 */
     @Volatile private var lastRejectReason: String? = null
+
+    /** 连续多少次"采纳之后才发现局面非法"；用于在重复发生时丢弃裁剪锚点。 */
+    @Volatile private var unsafeBoardStreak = 0
+
+    /** 兜底"计算中"已经重发过几次分析，以及上一次重发时刻。 */
+    @Volatile private var thinkingRestartAttempts = 0
+    @Volatile private var lastThinkingRestartAt = 0L
 
     /** 自动落子：同一回合的尝试次数（用于失败重试与放弃） */
     private var autoMoveAttempts = 0
@@ -1478,7 +1514,7 @@ class ScreenAssistService : Service() {
         // 准备前不创建或清理会话日志；旧会话日志留到下一次成功一键准备再替换。
         autoPlayOn = config.autoPlay
         detachForegroundObservation()
-        tracker = BoardTracker(confirmCount = 1)
+        tracker = BoardTracker(confirmCount = BOARD_CONFIRM_FRAMES)
         // 强度档位与持久化设置对齐（设置值不在档位表内时用”标准”）
         val idx = strengthLevels.indexOfFirst { it.second == config.searchDepth }
         strengthIndex = if (idx >= 0) idx else 2
@@ -1850,7 +1886,9 @@ class ScreenAssistService : Service() {
     private fun isContinuousScanMode(): Boolean = activeWorkMode != AssistConfig.MODE_MANUAL
 
     private fun desiredCaptureDemand(p: AssistPhase.Phase = refreshPhase()): CaptureDemand {
-        return when (AssistPhase.capture(p, autoMode = isContinuousScanMode())) {
+        // 必须把「引擎是否真的在搜索」一起传进去：THINKING 既是真计算中，也是规则表的兜底出口，
+        // 兜底态必须继续取帧，否则状态机原地死锁（真机日志 238 秒零识别）。
+        return when (AssistPhase.capture(p, autoMode = isContinuousScanMode(), engineSearching = searching)) {
             AssistPhase.Capture.OFF -> CaptureDemand.OFF
             AssistPhase.Capture.ON_DEMAND -> CaptureDemand.ONE_SHOT
             AssistPhase.Capture.CONTINUOUS -> CaptureDemand.CONTINUOUS
@@ -1883,7 +1921,7 @@ class ScreenAssistService : Service() {
         override fun run() {
             val p = refreshPhase()
         if (!paused && !manualMode &&
-            (isContinuousScanMode() || refresh.isActive || AssistPhase.needsBoard(p))) {
+            (isContinuousScanMode() || refresh.isActive || AssistPhase.needsBoard(p, searching))) {
             val now = System.currentTimeMillis()
             // 屏幕静止时 VirtualDisplay 不再投递新帧，八个连续样本永远凑不齐；
             // 这里用“静默即稳定”放行最后一张样本，否则识别会一次都不发生。
@@ -2566,6 +2604,7 @@ class ScreenAssistService : Service() {
 
         refresh.consumeAttempt(null)
         refresh.succeed()
+        resetVisionRecoveryAfterAccepted()
         if (userRefreshActive) userRefreshActive = false
         pendingBoard = result
         pendingBoardAt = System.currentTimeMillis()
@@ -2697,13 +2736,34 @@ class ScreenAssistService : Service() {
             null
         } ?: return null
         if (mapped.cellClassConflicts.isNotEmpty()) {
-            val summary = mapped.cellClassConflicts.joinToString(";") { conflict ->
-                "(${conflict.row},${conflict.col})=${conflict.firstPiece}/${conflict.secondPiece} " +
-                    "score=${"%.3f".format(conflict.firstScore)}/${"%.3f".format(conflict.secondScore)}"
+            // 同格冲突本身不等于棋面不可用：映射阶段已经按「高分候选占位、低分候选丢弃」
+            // 处理过，mapped.screenRaw 就是胜出结果。旧逻辑对冲突一律整帧否决，导致
+            // 「结果已经正确、只是同格另有一个低分候选」的帧被永久拒绝，进而无限重试，
+            // 真机日志里因此连续 116 秒、111 次失败全部同因，用户界面完全无法使用。
+            // 现在只在胜负足够明确、最终棋面确实落在胜出候选上、且整盘仍通过全部
+            // 棋面安全门时才放行；模糊僵局与非法棋面仍然拒绝，不改写任何类别。
+            val verdicts = mapped.cellClassConflicts.map {
+                it to DetectionConflictTolerancePolicy.evaluate(it, mapped.screenRaw)
             }
-            lastRecognitionRejectReason = "当前画面存在同格类别冲突"
-            Log.i(TAG, "vision rejected same-cell class competition: $summary")
-            return null
+            val tolerable = verdicts.all { it.second.tolerable } &&
+                hasBothKingsForVision(mapped.canonical) &&
+                AssistBoard.validate(mapped.canonical).isEmpty() &&
+                AssistBoard.invalidPiecePlacement(mapped.canonical) == null
+            if (!tolerable) {
+                val summary = mapped.cellClassConflicts.joinToString(";") { conflict ->
+                    "(${conflict.row},${conflict.col})=${conflict.firstPiece}/${conflict.secondPiece} " +
+                        "score=${"%.3f".format(conflict.firstScore)}/${"%.3f".format(conflict.secondScore)}"
+                }
+                lastRecognitionRejectReason = "当前画面存在同格类别冲突"
+                Log.i(TAG, "vision rejected same-cell class competition: $summary")
+                return null
+            }
+            val tolerated = verdicts.joinToString(";") { (conflict, verdict) ->
+                "(r=${conflict.row},c=${conflict.col})${conflict.firstPiece}/${conflict.secondPiece} " +
+                    "gap=${"%.3f".format(verdict.gap)}"
+            }
+            Log.i(TAG, "vision tolerated same-cell class competition: $tolerated")
+            trace("VISION_CONFLICT_TOLERATED", tolerated)
         }
         if (epoch != recognitionEpoch || mapped.pieceCount < MIN_RECOGNIZED_PIECES) return null
         // 不用上一局面补子、改字或判断“哪一类更像”：此处只发布当前模型的独立结果。
@@ -2791,8 +2851,8 @@ class ScreenAssistService : Service() {
         }
 
         streamAnomalyStreak = 0
-        resetVisionRecoveryAfterAccepted()
-        // 通过安全门 = 屏幕上有棋盘：退出待机，采样恢复 8fps。
+        // 阈值恢复只在真正提交/确认的棋面上复位；单帧安全候选但尚未通过
+        // BoardTracker 的连续确认门时，仍属于“识别未闭合”，不能过早清零失败计数。
         noBoardIdle = false
         // 锚点连续通过时逐步放宽整屏复核；任何一次拒绝都会把它打回严格值。
         if (mapped.anchorSource != DetectionBoardMapper.AnchorSource.PIECE_BBOX) {
@@ -2805,6 +2865,24 @@ class ScreenAssistService : Service() {
             fullVisionAnchorStreak = 0
             fullVisionRecheckBonusMs = 0L
         }
+        // 终点棋子类别被误识别时，用「起点原类别」还原，并交给规则引擎验证这确实是一步合法着法
+        // （PieceIdentityPolicy.repairMovedPiece 内部只放行 isLegalSingleMove 通过的棋面）。
+        // 这一步同时服务两个目标：把“落子后终点认错字”的真实错棋改对（提精度），
+        // 以及让“能被规则证明的一步合法着法”走快确认（提速）。落子事务期间不介入——
+        // 那一段有自己的回执判定，不能被这里的纠错抢走证据。
+        var repairedScreen: Array<IntArray>? = null
+        var legalMove = false
+        if (activeLanding == null) {
+            val confirmedBoard = tracker.confirmed?.canonical
+            if (confirmedBoard != null) {
+                PieceIdentityPolicy.repairMovedPiece(confirmedBoard, canonical)?.let { repaired ->
+                    canonical = repaired
+                    repairedScreen = DetectionBoardMapper.toCanonical(repaired, mapped.orientation)
+                    trace("VISION_CLASS_REPAIR", "orient=${mapped.orientation} anchor=${mapped.anchorSource}")
+                }
+                legalMove = AssistBoard.isLegalSingleMove(confirmedBoard, canonical)
+            }
+        }
         lastSeen = SeenBoard(canonical, frame.capturedAt)
         sessionGrid = mapped.grid
         lastMappedAt = System.currentTimeMillis()
@@ -2815,7 +2893,7 @@ class ScreenAssistService : Service() {
         lastAnchorSource = mapped.anchorSource
         lastFailReason = null
         val result = RecognitionResult(
-            canonical, mapped.screenRaw, mapped.orientation,
+            canonical, repairedScreen ?: mapped.screenRaw, mapped.orientation,
             emptyList(), 0, trackingPieceCount, mapped.avgScore)
         Log.d(TAG, "rec(stable-stream): stable=$stableFrameCount pieces=$trackingPieceCount " +
             "orient=${mapped.orientation} anchor=${mapped.anchorSource}")
@@ -2846,10 +2924,11 @@ class ScreenAssistService : Service() {
         }
         if (consumeRefreshResult(result, epoch)) return
         if (semiAuto) {
+            resetVisionRecoveryAfterAccepted()
             postRender()
             return
         }
-        when (tracker.onFrame(result, config.matchTolerance)) {
+        when (tracker.onFrame(result, config.matchTolerance, legalMove)) {
             BoardTracker.Event.NEW_BOARD -> {
                 cropUnstableStreak = 0
                 onBoardConfirmed(epoch)
@@ -2864,7 +2943,10 @@ class ScreenAssistService : Service() {
                     lastFullVisionCheckAt = 0L
                 }
             }
-            BoardTracker.Event.SAME_BOARD -> Unit
+            BoardTracker.Event.SAME_BOARD -> {
+                // 已确认棋面再次通过稳定/结构门，才算一次真正成功的识别。
+                resetVisionRecoveryAfterAccepted()
+            }
         }
     }
 
@@ -3003,6 +3085,7 @@ class ScreenAssistService : Service() {
         }
         previewState.clear()
         resetSuggestionState(newAnalysisCycle = true)
+        resetVisionRecoveryAfterAccepted()
         postRender()
         scheduleAnalysisDebounced()
     }
@@ -3201,6 +3284,7 @@ class ScreenAssistService : Service() {
                     trace("REANALYZE_AFTER_LANDING_FAILURE", "fen=$newFen")
                     scheduleAnalysisDebounced()
                 }
+                resetVisionRecoveryAfterAccepted()
                 requestRenderOnly()
                 return@post
             }
@@ -3212,6 +3296,7 @@ class ScreenAssistService : Service() {
             autoLastUcci = null
             previewState.clear()
             resetSuggestionState(newAnalysisCycle = true)
+            resetVisionRecoveryAfterAccepted()
             Log.i(TAG, "board confirmed: $newFen")
             postRender()
             scheduleAnalysisDebounced()
@@ -3437,11 +3522,15 @@ class ScreenAssistService : Service() {
             val unsafe = AssistBoard.engineUnsafeReason(canonical, redGo)
             if (unsafe != null) {
                 lastRejectReason = unsafe
-                mainHandler.post {
-                    notifyBoardProblem(unsafe)
-                }
+                // 这份棋面已经被 BoardTracker 采纳、正被当作"当前局面"，但它连送引擎都不合法。
+                // 只记一次拒绝是不够的：轮次和局面都不会变，下一次分析请求会被同一道自检挡回，
+                // 状态机就永久停在"计算中"（真机日志里 RESTART_ANALYSIS 每 400ms 刷一次、
+                // 13 秒内 25 次却始终没有 ANALYSIS_REQUEST 就是这个环）。
+                // 必须作废这份棋面、退回识盘，让识别重新给一个可用局面。
+                mainHandler.post { abandonUnsafeBoard(unsafe) }
                 return@post
             }
+            unsafeBoardStreak = 0
             analysisCycleGate.beginOrReuse(fen)
             analyzedFen = fen
             val mode = config.thinkingMode
@@ -4068,6 +4157,11 @@ class ScreenAssistService : Service() {
             lastWaitingForceScanAt = Long.MIN_VALUE
         }
 
+        // 取帧档位必须跟着阶段走。看门狗是"一定会被周期调用"的那条线：把同步放在这里，
+        // 即使这一段没有任何重绘或回调，取帧也不会停在旧阶段上。
+        // 真机卡死正是"进入兜底 THINKING 后档位停在 OFF，再没有任何代码把它改回来"。
+        syncCaptureDemand(p)
+
         val pending = pendingAutoMove
         if (pending != null && AutoChannelRestartPolicy.shouldReleasePendingMove(now, pending.createdAt)) {
             trace(
@@ -4086,7 +4180,7 @@ class ScreenAssistService : Service() {
         // 读盘阶段必须具备持续唤醒，不依赖某一次状态切换时恰好拿到图片。
         // 尤其是 THINKING→READY 或落子回执后，ImageReader 可能已经没有待回调帧；
         // 看门狗每轮主动踢一次，避免首次识别后永远停在“待定位”。
-        if (AssistPhase.needsBoard(p) && !refresh.isActive) {
+        if (AssistPhase.needsBoard(p, searching) && !refresh.isActive) {
             val sinceSample = if (lastStreamSampleAt == Long.MIN_VALUE) Long.MAX_VALUE
                 else now - lastStreamSampleAt
             val timeout = if (p == AssistPhase.Phase.WAITING)
@@ -4152,6 +4246,7 @@ class ScreenAssistService : Service() {
             sinceMapMs = sinceMap,
             engineReady = engineReady,
             engineWarmupMs = if (engineStarted) now - engineWarmupStartAt else 0L,
+            engineSearching = searching,
         )
         if (action != AssistPhase.WatchdogAction.NONE) {
             trace(
@@ -4186,6 +4281,51 @@ class ScreenAssistService : Service() {
                 lastMapAtForWatchdog = now
                 setStatus("长时间未识别到棋盘，已重置定位\n正在重新查找…")
                 postRender()
+            }
+
+            AssistPhase.WatchdogAction.RESTART_ANALYSIS -> {
+                // 兜底「计算中」干等太久 = 发起分析的路径没走通（周期闸门仍占着同一局面，
+                // 或落子重建后的旧状态把请求吞掉了）。强制作废该局面的分析周期再重新发起，
+                // 让状态机自己爬出死锁，而不是等用户强关。
+                //
+                // 真机教训：初版每 400ms 无条件重发一次，13 秒内刷了 25 次却始终没有
+                // ANALYSIS_REQUEST——因为真正的病根是"这份棋面本身非法"，重发多少次都没用。
+                // 所以这里必须限速 + 限次，次数用尽就作废局面回识盘（见 abandonUnsafeBoard）。
+                when (ThinkingRestartPolicy.decide(
+                    attempts = thinkingRestartAttempts,
+                    sinceLastRetryMs = now - lastThinkingRestartAt,
+                )) {
+                    ThinkingRestartPolicy.Action.THROTTLED -> Unit
+
+                    ThinkingRestartPolicy.Action.GIVE_UP -> {
+                        trace(
+                            "WATCHDOG_RESTART_ANALYSIS_GIVEUP",
+                            "attempts=$thinkingRestartAttempts phaseAgeMs=${now - phaseSinceAt} fen=$currentFen",
+                        )
+                        thinkingRestartAttempts = 0
+                        lastThinkingRestartAt = now
+                        abandonUnsafeBoard("引擎多次无法就当前局面开始计算")
+                    }
+
+                    ThinkingRestartPolicy.Action.RETRY -> {
+                        thinkingRestartAttempts++
+                        lastThinkingRestartAt = now
+                        trace(
+                            "WATCHDOG_RESTART_ANALYSIS",
+                            "attempt=$thinkingRestartAttempts phaseAgeMs=${now - phaseSinceAt} fen=$currentFen " +
+                                "searching=$searching settled=$searchSettled " +
+                                "gate=${analysisCycleGate.activePosition()} " +
+                                "landing=${landingState?.stage} pending=${pendingAutoMove != null}",
+                        )
+                        analysisCycleGate.invalidate()
+                        expectedAnalysisId = 0L
+                        searchSettled = false
+                        setStatus("引擎长时间没有开始计算，正在重新发起本局面的分析…")
+                        postRender()
+                        scheduleAnalysis()
+                        requestAutoDrive()
+                    }
+                }
             }
 
             AssistPhase.WatchdogAction.RESTART_ENGINE -> {
@@ -5225,6 +5365,12 @@ class ScreenAssistService : Service() {
             val previous = phase
             phase = p
             phaseSinceAt = System.currentTimeMillis()
+            if (p != AssistPhase.Phase.THINKING) {
+                // 离开兜底"计算中"就清空重发计数：下一次干等重新从第一次算起。
+                // 不清的话，正常对局里零散的重发会累加到上限，导致一次误作废。
+                thinkingRestartAttempts = 0
+                lastThinkingRestartAt = 0L
+            }
             trace(
                 "PHASE",
                 "$previous->$p fen=$currentFen searching=$searching settled=$searchSettled " +
@@ -5281,7 +5427,7 @@ class ScreenAssistService : Service() {
         // 这时再写"未取帧"会让人以为出了问题。
         val captureNote = when {
             captureDemand == CaptureDemand.ONE_SHOT -> " · 单次取帧"
-            captureDemand == CaptureDemand.OFF && AssistPhase.needsBoard(phase) -> " · 未取帧"
+            captureDemand == CaptureDemand.OFF && AssistPhase.needsBoard(phase, searching) -> " · 未取帧"
             else -> ""
         }
         // 取帧策略只说明“我们打算取不取”，这里再补一句“画面实际上还在不在进来”，
@@ -5313,7 +5459,7 @@ class ScreenAssistService : Service() {
      * 读盘阶段没有新画面时给出秒数，恢复动作发生后由 [rebuildCapturePipeline] 归零重算。
      */
     private fun streamLivenessNote(): String {
-        if (!AssistPhase.needsBoard(phase)) return ""
+        if (!AssistPhase.needsBoard(phase, searching)) return ""
         if (lastStreamFrameAt <= 0L) return ""
         val age = System.currentTimeMillis() - lastStreamFrameAt
         return when {
@@ -6239,9 +6385,46 @@ class ScreenAssistService : Service() {
         }
     }
 
+    /**
+     * 已被采纳、正被当作"当前局面"的棋面，在送引擎前自检不通过（典型：非走子方王被将军，
+     * 说明这份识别结果本身就是错的）。
+     *
+     * 必须整体作废并退回识盘，而不是只记一次拒绝：局面和轮次都不变，下一次分析还会被
+     * 同一道自检挡回，状态机就会永久停在"计算中"，看门狗也救不回来。
+     * 连续作废时额外丢弃棋盘网格锚点并推进阈值阶梯，避免每一轮都在同一条错误路径上重来。
+     */
+    private fun abandonUnsafeBoard(reason: String) {
+        if (paused || manualMode || overlayClosed) return
+        unsafeBoardStreak++
+        trace(
+            "BOARD_ABANDONED_UNSAFE",
+            "reason=$reason streak=$unsafeBoardStreak fen=$currentFen redGo=$currentRedGo " +
+                "grid=${sessionGrid != null}",
+        )
+        tracker.reset(currentRedGo)
+        currentFen = ""
+        currentPieces = null
+        currentCanonical = null
+        adviceBoard = null
+        searchSettled = false
+        searching = false
+        analysisCycleGate.invalidate()
+        expectedAnalysisId = 0L
+        analyzedFen = ""
+        if (unsafeBoardStreak >= UNSAFE_BOARD_GRID_RESET_STREAK) {
+            // 反复读到同一个非法局面，多半是对错的裁剪锚点在自锁：回整屏重找。
+            sessionGrid = null
+            cropUnstableStreak = 0
+            lastFullVisionCheckAt = 0L
+            fullVisionAnchorStreak = 0
+            fullVisionRecheckBonusMs = 0L
+        }
+        notifyBoardProblem(reason)
+        postRender()
+    }
+
     /** 成功发布合法棋面后回到严格检测基线。 */
-    private fun resetVisionRecoveryAfterAccepted() {
-        if (thresholdRecoveryState.misses > 0) {
+    private fun resetVisionRecoveryAfterAccepted() {        if (thresholdRecoveryState.misses > 0) {
             trace(
                 "VISION_THRESHOLD_RESET",
                 "previousMisses=${thresholdRecoveryState.misses} previousLevel=${thresholdRecoveryState.level}",
@@ -6392,7 +6575,7 @@ class ScreenAssistService : Service() {
             }
             if (landingState != null || refresh.isActive ||
                 (!paused && isContinuousScanMode() &&
-                    (AssistPhase.needsBoard(p) || searching || (engineStarted && !engineReady)))) {
+                    (AssistPhase.needsBoard(p, searching) || searching || (engineStarted && !engineReady)))) {
                 requestWatchdog()
             }
         }, delayMs)
@@ -6452,19 +6635,53 @@ class ScreenAssistService : Service() {
         }
         val now = System.currentTimeMillis()
         val fullDue = crop == null || now - lastFullVisionCheckAt >= fullVisionRecheckMs()
-        val result = if (fullDue) {
+        val thresholdScale = DetectionThresholdRecoveryPolicy.threshold(thresholdState) /
+            DetectionThresholdRecoveryPolicy.BASE_THRESHOLD
+        val classMarginScale = DetectionThresholdRecoveryPolicy.margin(thresholdState) / 0.05
+        var result = if (fullDue) {
             lastFullVisionCheckAt = now
             // 本次稳定关键帧只执行一次整屏/框选范围推理；下一次样本再切换到裁剪定位。
             yolo.detect(frame, regionCrop, null, excluded, relaxedRecovery,
-                thresholdScale = DetectionThresholdRecoveryPolicy.threshold(thresholdState) /
-                    DetectionThresholdRecoveryPolicy.BASE_THRESHOLD,
-                classMarginScale = DetectionThresholdRecoveryPolicy.margin(thresholdState) / 0.05)
+                thresholdScale = thresholdScale,
+                classMarginScale = classMarginScale)
         } else {
             // 已有网格时只执行一次裁剪推理；锚点仅提供几何基准，不替换当前类别。
             yolo.detect(frame, crop, anchor, excluded, relaxedRecovery,
-                thresholdScale = DetectionThresholdRecoveryPolicy.threshold(thresholdState) /
-                    DetectionThresholdRecoveryPolicy.BASE_THRESHOLD,
-                classMarginScale = DetectionThresholdRecoveryPolicy.margin(thresholdState) / 0.05)
+                thresholdScale = thresholdScale,
+                classMarginScale = classMarginScale)
+        }
+
+        // 裁剪链路一旦出现同格冲突、缺王或完全映射失败，不能把同一个坏锚点
+        // 无限重试。用一个有界的整屏复核重新建立几何基准；只有整屏候选更安全
+        // （无同格冲突，或补回缺失的双王/更多棋子）时才替换裁剪结果。
+        if (!fullDue && crop != null &&
+            now - lastCropFailureFullRecheckAt >= CROP_FAILURE_FULL_RECHECK_MS
+        ) {
+            val current = result
+            val currentHasBothKings = current?.let { hasBothKingsForVision(it.canonical) } == true
+            val needsFullRecheck = current == null ||
+                current.cellClassConflicts.isNotEmpty() || !currentHasBothKings
+            if (needsFullRecheck) {
+                lastCropFailureFullRecheckAt = now
+                trace(
+                    "VISION_FULL_RECHECK",
+                    "reason=${if (current == null) "crop-null" else if (current.cellClassConflicts.isNotEmpty()) "cell-conflict" else "king-missing"} " +
+                        "crop=${crop.joinToString(",") { "%.0f".format(it) }}",
+                )
+                val full = yolo.detect(
+                    frame, regionCrop, null, excluded, relaxedRecovery = true,
+                    thresholdScale = thresholdScale,
+                    classMarginScale = classMarginScale,
+                )
+                if (full != null && full.cellClassConflicts.isEmpty()) {
+                    val fullHasBothKings = hasBothKingsForVision(full.canonical)
+                    val acceptFull = current == null ||
+                        current.cellClassConflicts.isNotEmpty() ||
+                        (fullHasBothKings && !currentHasBothKings) ||
+                        full.pieceCount >= current.pieceCount
+                    if (acceptFull) result = full
+                }
+            }
         }
         trace(
             "VISION_RAW",
@@ -6473,6 +6690,16 @@ class ScreenAssistService : Service() {
                 "mapped=${result?.pieceCount ?: 0} detections=${yolo.lastDetectionSummary}",
         )
         return result
+    }
+
+    private fun hasBothKingsForVision(board: Array<IntArray>): Boolean {
+        var red = 0
+        var black = 0
+        for (row in board) for (piece in row) {
+            if (piece == Piece.WSHUAI) red++
+            if (piece == Piece.BJIANG) black++
+        }
+        return red == 1 && black == 1
     }
 
 

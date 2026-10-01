@@ -6,6 +6,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class FrameStabilityPolicyTest {
+    @Test fun `stable window still requires eight samples before model input`() {
+        assertEquals(8, FrameStabilityPolicy.REQUIRED_STABLE_FRAMES)
+        assertEquals(125L, FrameStabilityPolicy.SAMPLE_PERIOD_MS)
+    }
+
     private fun frame(color: Int): Frame = Frame(8, 8, IntArray(64) { 0xFF000000.toInt() or color })
 
     @Test fun `sampling cadence is eight fps with eight stable samples`() {

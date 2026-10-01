@@ -6,6 +6,10 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class HeartbeatPolicyTest {
+    @Test fun `service confirmation target is approximately two seconds including the stable window`() {
+        assertEquals(2_000L, 8L * FrameStabilityPolicy.SAMPLE_PERIOD_MS * 2L)
+    }
+
     @Test fun `waiting stage timeout and cooldown are halved`() {
         // 用户要求：等待对方落子时的检测间隔比原先缩短一倍。
         assertEquals(125L, HeartbeatPolicy.WAITING_SCAN_TIMEOUT_MS)

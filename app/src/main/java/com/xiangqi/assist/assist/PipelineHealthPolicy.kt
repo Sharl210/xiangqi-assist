@@ -17,6 +17,8 @@ object PipelineHealthPolicy {
     const val STREAM_STABLE_STALL_MS = 1_500L
     /** No recognition completion (valid or rejected) after stable frames were produced. */
     const val VISION_STALL_MS = 2_500L
+    /** 静止 VirtualDisplay 的最长静默保护；超过后按录屏停摆处理，允许重建取帧。 */
+    const val STATIC_STREAM_GRACE_MS = 3_000L
     /** Rate limit for destructive pipeline rebuild/reset actions. */
     const val MIN_RECOVERY_INTERVAL_MS = 625L
     /**
@@ -93,6 +95,8 @@ object PipelineHealthPolicy {
         val frameStallRebuilds: Int = 0,
         /** 本次取帧管线重建后已收到的原始 ImageReader 帧数。 */
         val framesSinceRebuild: Int = 0,
+        /** 已经有稳定棋面且当前阶段只是等待棋面变化时，不把“没有新棋面提交”当成视觉故障。 */
+        val waitingForBoardChange: Boolean = false,
         val now: Long = 0L,
     )
 
@@ -150,7 +154,9 @@ object PipelineHealthPolicy {
         if (h.lastFrameAt > 0L && h.now - h.lastFrameAt > STREAM_FRAME_STALL_MS) {
             // 静止画面可能只产生少量回调；本次管线只要已经收到过原始帧，
             // 就不能再次按“没有新帧”重建。静默画面由稳定窗口和 capturePump 处理。
-            if (h.framesSinceRebuild > 0) return Action.NONE
+            if (h.framesSinceRebuild > 0 &&
+                h.now - h.lastFrameAt <= STATIC_STREAM_GRACE_MS
+            ) return Action.NONE
             return frameStallAction(h)
         }
 
@@ -167,7 +173,7 @@ object PipelineHealthPolicy {
             return if (recoveryAllowed(h)) Action.RESET_VISION else Action.NONE
         }
 
-        if (h.lastStableAt > 0L) {
+        if (!h.waitingForBoardChange && h.lastStableAt > 0L) {
             val visionProgressAt = maxOf(
                 h.lastVisionAt,
                 h.lastRecognitionCompletedAt,
@@ -179,7 +185,9 @@ object PipelineHealthPolicy {
             }
         }
 
-        // Non-destructive global probe. It runs only after the existing hard-stage watchdogs,
+        // 有已确认棋面时，WAITING 阶段的职责只是等待下一次画面变化；
+        // 没有新的“棋面提交”并不等于识别链路停摆。帧停摆仍在上面的
+        // lastFrameAt 分支处理，真实无帧时依然可以重建录屏管线。
         // so a dead Surface is rebuilt instead of being poked forever.
         val sampleBase = maxOf(h.lastProcessedSampleAt, h.streamStartedAt, h.captureStartedAt)
         val sampleAge = if (sampleBase > 0L) h.now - sampleBase else Long.MAX_VALUE

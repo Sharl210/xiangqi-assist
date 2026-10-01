@@ -218,4 +218,31 @@ class DetectionBoardMapperTest {
         assertNotNull(mapped)
         assertTrue(AssistBoard.equal(AssistBoard.canonicalStart(), mapped!!.canonical))
     }
+
+    @Test
+    fun `device-log same-cell red rook versus red cannon is tolerable when the stronger piece wins the cell`() {
+        // 复刻 2026-10-01 设备端日志：同一格同时给出红炮 0.684 与红车 0.708。
+        // 映射按「高分占位」保留红车，容忍策略据此判为胜负明确。
+        val filler = listOf(
+            Piece.WJU to (0.0 to 9.0), Piece.WXIANG to (2.0 to 9.0), Piece.WSHI to (3.0 to 9.0),
+            Piece.WMA to (7.0 to 9.0), Piece.WXIANG to (6.0 to 9.0), Piece.WSHI to (5.0 to 9.0),
+            Piece.WBING to (0.0 to 6.0), Piece.WBING to (2.0 to 6.0), Piece.WBING to (4.0 to 6.0),
+            Piece.WBING to (6.0 to 6.0), Piece.WBING to (8.0 to 6.0),
+        ).map { pieceDet(it.first, it.second.first, it.second.second) }
+        val dets = mutableListOf(
+            boardDet,
+            pieceDet(Piece.WSHUAI, 4.0, 9.0),
+            pieceDet(Piece.WPAO, 1.0, 7.0, score = 0.684),
+            pieceDet(Piece.WJU, 1.0, 7.0, score = 0.708),
+        )
+        dets.addAll(2, filler)
+        val mapped = DetectionBoardMapper.map(dets, frameW, frameH)
+        assertNotNull(mapped)
+        assertEquals(Piece.WJU, mapped!!.screenRaw[7][1])
+        val conflict = mapped.cellClassConflicts.single()
+        val verdict = DetectionConflictTolerancePolicy.evaluate(conflict, mapped.screenRaw)
+        assertTrue(verdict.tolerable)
+        assertEquals(Piece.WJU, verdict.winnerPiece)
+        assertEquals(0.024, verdict.gap, 1e-9)
+    }
 }

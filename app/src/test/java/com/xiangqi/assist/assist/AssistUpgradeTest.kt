@@ -104,19 +104,40 @@ class AssistUpgradeTest {
     }
 
     @Test
-    fun `tolerance confirms board despite single cell jitter`() {
+    fun `tolerance absorbs a dropped cell but never a swapped piece class`() {
         val tracker = BoardTracker(confirmCount = 3)
         tracker.reset(true)
         val start = AssistBoard.canonicalStart()
         repeat(3) { tracker.onFrame(res(start), 1) }
 
         val mid = movedBoard()
-        // 两帧之间夹一帧"某一格误检"的抖动帧（容忍 1 格差）：候选仍是干净的 mid，
-        // 攒够确认帧后确认的是 mid，而不是带噪声的那一帧。
+        // 容差的用途是吸收"某一格漏检/高亮"这类**占用格**差异：候选仍是干净的 mid，
+        // 噪声帧只贡献一次命中，不会把噪声写进已确认棋面。
         assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(mid), 1))
-        val jitter = AssistBoard.clone(mid)
-        jitter[0][0] = Piece.BMA // 角上车被误检成马（单格噪声，未换类别）
-        assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(jitter), 1))
+        val dropped = AssistBoard.clone(mid)
+        dropped[0][0] = Piece.EMPTY
+        assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(dropped), 1))
+        assertEquals(BoardTracker.Event.NEW_BOARD, tracker.onFrame(res(mid), 1))
+        assertTrue(AssistBoard.equal(mid, tracker.confirmed!!.canonical))
+    }
+
+    @Test
+    fun `a swapped piece class is never absorbed by tolerance`() {
+        // 2026-10-01 收紧：容差只吃"占用格"差异，不吃"同格换汉字"。
+        // 车→马这类类别误读若能靠容差混过确认，就会把错误类别写进棋面并直接算错棋；
+        // 收紧后这类噪声不再计入候选命中，必须回到干净读法重新走完确认门。
+        val tracker = BoardTracker(confirmCount = 3)
+        tracker.reset(true)
+        val start = AssistBoard.canonicalStart()
+        repeat(3) { tracker.onFrame(res(start), 1) }
+
+        val mid = movedBoard()
+        assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(mid), 1))
+        val swapped = AssistBoard.clone(mid)
+        swapped[0][0] = Piece.BMA // 角上车被误检成马：同格换类别
+        assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(swapped), 1))
+        assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(mid), 1))
+        assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(mid), 1))
         assertEquals(BoardTracker.Event.NEW_BOARD, tracker.onFrame(res(mid), 1))
         assertTrue(AssistBoard.equal(mid, tracker.confirmed!!.canonical))
     }

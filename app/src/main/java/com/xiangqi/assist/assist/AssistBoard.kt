@@ -325,7 +325,7 @@ object AssistBoard {
      * 万一这个棋面与真实棋面有出入，这一步打到游戏里就会被判"走子不符合规范"，
      * 白点一次、还引起注意。与其让它打出去，不如拦下来、重新识别。
      *
-     * 规则引擎本身异常时返回 true（不拦），避免把功能整体卡死。
+     * 规则引擎本身异常时返回 false（不放行），交给上层保留棋面并重新识别。
      */
     fun isLegalMoveInModel(pieces: IntArray, ucci: String, mySideIsRed: Boolean): Boolean {
         if (ucci.length < 4 || pieces.size < 90) return false
@@ -347,7 +347,8 @@ object AssistBoard {
             }
             Rule.isValidMove(Move(Position(fx, fy), Position(tx, ty), b), b)
         } catch (t: Throwable) {
-            true
+            // 规则引擎异常不能把未经验证的着法放行；调用方应保留当前棋面并等待重新识别。
+            false
         }
     }
 

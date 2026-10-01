@@ -272,6 +272,26 @@ class YoloBoardDetector(
             }
         }
 
+        // 有界的同阵营强弱冲突消解：当前真机日志中同一格长期同时出现两个黑方类别，
+        // 弱候选约0.54、强候选约0.80；单纯降低阈值不会改变它们同时存在。
+        // 只有满足明显分差且删除弱候选后重新映射完整安全时才接受，否则继续拒绝。
+        if (mapped?.cellClassConflicts?.isNotEmpty() == true) {
+            val baseline = mapped!!
+            val dominant = resolveDominantSameColorConflicts(
+                detections = shifted,
+                baseline = baseline,
+                frameW = frame.width,
+                frameH = frame.height,
+                anchor = anchor,
+                preferAnchor = cropHint != null && anchor != null,
+                exclude = exclude,
+            )
+            if (dominant != null) {
+                mapped = dominant
+                lastDetectionSummary = "dominant-conflict-recovery;$lastDetectionSummary"
+            }
+        }
+
         // 缺王、非法落点、数量异常或同格冲突都进入一次定向复核；
         // 复核只提供额外观测机会，最终仍必须通过双王、位置和结构安全门。
         val needsTargetedRecovery = DetectionRecoveryPolicy.needsTargetedRecovery(mapped)
@@ -396,6 +416,61 @@ class YoloBoardDetector(
             "dropped=${mapped?.dropped ?: 0} anchor=${mapped?.anchorSource ?: "-"} " +
             "criticalRecovery=$criticalRecoveryUsed")
         return mapped
+    }
+
+    private fun resolveDominantSameColorConflicts(
+        detections: List<YoloDetection>,
+        baseline: DetectionBoardMapper.MappedBoard,
+        frameW: Int,
+        frameH: Int,
+        anchor: DetectionBoardMapper.AnchorHint?,
+        preferAnchor: Boolean,
+        exclude: IntArray?,
+    ): DetectionBoardMapper.MappedBoard? {
+        val grid = baseline.grid ?: return null
+        val gridX0 = grid.nx0 * frameW
+        val gridY0 = grid.ny0 * frameH
+        val gridW = (grid.nx1 - grid.nx0) * frameW / 8.0
+        val gridH = (grid.ny1 - grid.ny0) * frameH / 9.0
+        if (gridW <= 0.0 || gridH <= 0.0) return null
+
+        val remove = mutableSetOf<YoloDetection>()
+        for (conflict in baseline.cellClassConflicts) {
+            if (!DetectionConflictPolicy.shouldTryDominantResolution(
+                    conflict.firstPiece,
+                    conflict.secondPiece,
+                    conflict.firstScore,
+                    conflict.secondScore,
+                )
+            ) continue
+            val weakPiece = if (conflict.firstScore <= conflict.secondScore) {
+                conflict.firstPiece
+            } else {
+                conflict.secondPiece
+            }
+            val weak = detections
+                .filter { !it.isBoard && it.piece == weakPiece }
+                .filter {
+                    val col = ((it.cx - gridX0) / gridW).roundToInt()
+                    val row = ((it.cy - gridY0) / gridH).roundToInt()
+                    row == conflict.row && col == conflict.col
+                }
+                .minByOrNull { it.score }
+            if (weak != null) remove += weak
+        }
+        if (remove.isEmpty()) return null
+
+        val filtered = detections.filterNot { it in remove }
+        val candidate = DetectionBoardMapper.map(
+            filtered,
+            frameW,
+            frameH,
+            anchor = anchor,
+            preferAnchor = preferAnchor,
+        ) ?: return null
+        if (!isSafeRecoveredBoard(candidate) || candidate.cellClassConflicts.isNotEmpty()) return null
+        if (candidate.pieceCount < baseline.pieceCount - remove.size) return null
+        return candidate
     }
 
     private fun boardZoomHint(

@@ -4,8 +4,15 @@ import com.xiangqi.assist.gamelogic.Piece
 
 /** 棋子类别（车/马/象/兵/卒等）的时序一致性规则。 */
 object PieceIdentityPolicy {
-    /** 同一格类别变化必须重新得到完整稳定窗口，不能用错误类别连续多帧污染已确认棋面。 */
-    const val CLASS_CHANGE_CONFIRM_FRAMES = FrameStabilityPolicy.REQUIRED_STABLE_FRAMES
+    /**
+     * 同一格类别变化不能用错误类别连续多帧污染已确认棋面，因此确认门比普通变化更严。
+     *
+     * 2026-10-01：原值直接取了取样窗口长度（8 帧）。但每一次确认都要跑一次模型推理
+     * （真机 Medium 实测约 0.3–0.7 秒），8 帧就意味着**一帧可疑画面要卡 4 秒以上**才可能被
+     * 接受或拒绝；而它本来就只是"可疑"，单纯拉长确认并不能提高正确率，只是把延迟放大。
+     * 取 4 帧（普通门的两倍）既保留"类别变化必须反复一致"的严格性，也不再制造 4 秒级延迟。
+     */
+    const val CLASS_CHANGE_CONFIRM_FRAMES = 4
 
     /** 两个盘面中“格子仍有子，但类别或阵营变了”的数量。 */
     fun replacementCount(a: Array<IntArray>, b: Array<IntArray>): Int {

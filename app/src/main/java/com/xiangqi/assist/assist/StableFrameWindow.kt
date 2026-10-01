@@ -21,6 +21,17 @@ class StableFrameWindow(
     private val quietReleaseMs: Long = 600L,
     /** 两次静默放行之间的最小间隔，避免拒绝后每 100ms 重复跑一次同一个画面。 */
     private val quietReleaseMinGapMs: Long = 500L,
+    /**
+     * **饿死放行**兜底：画面一直不稳定（对局里的计时、动画、光影变化都可能让稳定窗口永远不闭合），
+     * 或者画面完全静止而释放闸门早已关闭，都会让识别长时间一次都不产出。
+     * 距离上次放行超过这个时长仍没有新的放行，就强制放行窗口里最新的样本一次。
+     *
+     * 为什么可以这么做：放行只代表"送模型看一眼"，真正的安全门（双王、棋面结构、
+     * 非法位置、合法着法、多帧确认）都在后面，坏帧照样被拒；它换来的是
+     * "识别永远不会彻底静默"，看门狗也不会再因为长期没有识别结果而误判成取帧故障、
+     * 反复丢弃已经对好的棋盘网格。取 2500ms 是为了兼顾功耗：静止局面下约 0.4 次/秒。
+     */
+    private val starvationReleaseMs: Long = 2_500L,
 ) {
     data class Result(
         val ready: Boolean,
@@ -42,6 +53,10 @@ class StableFrameWindow(
     private var releasedForStableRun = false
     /** 上一次静默放行时刻；用于限制重复跑同一静止画面。 */
     private var lastQuietReleaseAt = Long.MIN_VALUE
+    /** 上一次真正放行（含稳定窗口放行）的时刻；饿死放行按它计时。 */
+    private var lastReleasedAt = Long.MIN_VALUE
+    /** 当前这批样本开始收集的时刻；从未放行过时用它作为饿死计时基准。 */
+    private var windowStartedAt = Long.MIN_VALUE
 
     init {
         require(requiredStableFrames > 0) { "requiredStableFrames must be positive" }
@@ -68,6 +83,7 @@ class StableFrameWindow(
         val previous = samples.peekLast()
         val changed = previous != null && !FrameStabilityPolicy.isStable(previous.signature, signature)
         samples.addLast(Sample(frame, signature))
+        if (windowStartedAt == Long.MIN_VALUE) windowStartedAt = now
         while (samples.size > requiredStableFrames) samples.removeFirst()
         lastAcceptedAt = now
 
@@ -84,6 +100,7 @@ class StableFrameWindow(
         }
 
         releasedForStableRun = true
+        lastReleasedAt = now
         val selected = samples.maxByOrNull { FrameStabilityPolicy.clarityScore(it.frame) }?.frame ?: frame
         return Result(true, selected, requiredStableFrames, changed)
     }
@@ -102,23 +119,44 @@ class StableFrameWindow(
     fun sampleCount(): Int = samples.size
 
     /**
-     * 静默放行：屏幕静止时 VirtualDisplay 不再产生新帧，"八个连续样本"永远凑不齐。
-     * 只要最后一张样本之后静默超过 [quietReleaseMs]，就用这张已经在窗口里的样本放行。
+     * 静止/停滞画面的兜底放行。
      *
-     * 已积累两张以上样本时仍要求它们彼此稳定（真的没有变化才放行）；
-     * 只有一张样本时，"静默"本身就是画面没有变化的证据。
+     * 两条路都走这里，缺任何一条识别都会**永久静默**：
+     * 1. **静默放行**：屏幕静止时 VirtualDisplay 不再产生新帧，"连续稳定样本"永远凑不齐；
+     *    只要最后一张样本之后静默超过 [quietReleaseMs]，就用窗口里最后这张样本放行
+     *    （样本 ≥2 张时仍要求彼此稳定，真的没变化才放行）。
+     * 2. **饿死放行**：距上次放行超过 [starvationReleaseMs] 仍没有新放行——无论是因为
+     *    释放闸门关着（本次稳定段已放行、又没有新样本去清它），还是因为画面一直在变、
+     *    稳定窗口永不闭合——都强制放行最新样本一次。安全门在后面，坏帧照样被拒。
+     *
+     * 限速：闸门关着时的巡检按 [starvationReleaseMs]（静止局面约 0.4 次/秒推理，兼顾功耗）；
+     * 闸门开着时是"刚被拒绝/刚进入核对"的重试，按 [quietReleaseMinGapMs] 尽快再试。
      */
     @Synchronized
     fun releaseWhenQuiet(now: Long): Result {
         val last = samples.peekLast() ?: return Result(false, null, 0, false)
-        if (releasedForStableRun) return Result(false, null, samples.size, false)
         if (lastAcceptedAt == Long.MIN_VALUE) return Result(false, null, samples.size, false)
-        if (now - lastAcceptedAt < quietReleaseMs) return Result(false, null, samples.size, false)
-        if (lastQuietReleaseAt != Long.MIN_VALUE && now - lastQuietReleaseAt < quietReleaseMinGapMs) {
+        val quiet = now - lastAcceptedAt >= quietReleaseMs
+        val basis = if (lastReleasedAt != Long.MIN_VALUE) lastReleasedAt else windowStartedAt
+        val sinceReleaseOrStart = if (basis == Long.MIN_VALUE) -1L else now - basis
+        val starved = sinceReleaseOrStart >= 0L && sinceReleaseOrStart >= starvationReleaseMs
+        if (!quiet && !starved) return Result(false, null, samples.size, false)
+        // 闸门已经关着（本次稳定段已经放行过）= 这是一次"明知没变化"的巡检，
+        // 必须按饿死间隔限速，不能让静止局面每 500ms 跑一次推理。
+        // 闸门开着（刚被拒绝、刚进入落子核对）= 这是重试，按最小间隔尽快再试。
+        val minGap = if (releasedForStableRun) starvationReleaseMs else quietReleaseMinGapMs
+        if (!starved && lastReleasedAt != Long.MIN_VALUE &&
+            now - lastReleasedAt < minGap
+        ) {
             return Result(false, null, samples.size, false)
         }
-        if (samples.size >= 2 && !isWindowStable()) return Result(false, null, samples.size, false)
+        // 静默放行仍要求窗口确实稳定；只有"饿死"这一条才允许在画面持续不稳定时也放行一次，
+        // 否则一直变化的画面会让识别永远不产出，看门狗又会误判成取帧故障。
+        if (!starved && samples.size >= 2 && !isWindowStable()) {
+            return Result(false, null, samples.size, false)
+        }
         releasedForStableRun = true
+        lastReleasedAt = now
         lastQuietReleaseAt = now
         return Result(true, last.frame, samples.size.coerceAtMost(requiredStableFrames), false)
     }
@@ -166,5 +204,8 @@ class StableFrameWindow(
         lastAcceptedAt = Long.MIN_VALUE
         releasedForStableRun = false
         lastQuietReleaseAt = Long.MIN_VALUE
+        // 清空样本后不存在"上次放行"这个基准；否则新一批样本会被误判成饿死而立刻放行。
+        lastReleasedAt = Long.MIN_VALUE
+        windowStartedAt = Long.MIN_VALUE
     }
 }

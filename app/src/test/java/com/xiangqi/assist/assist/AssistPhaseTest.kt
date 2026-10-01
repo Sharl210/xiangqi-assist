@@ -269,9 +269,9 @@ class AssistPhaseTest {
     @Test
     fun `only board-reading phases capture`() {
         val auto = true
-        // 不取帧：计算中 / 落子中 / 暂停 / 手动 / 异常
+        // 不取帧：真·计算中 / 落子中 / 暂停 / 手动 / 异常
         assertEquals(AssistPhase.Capture.OFF,
-            AssistPhase.capture(Phase.THINKING, autoMode = auto))
+            AssistPhase.capture(Phase.THINKING, autoMode = auto, engineSearching = true))
         assertEquals(AssistPhase.Capture.OFF,
             AssistPhase.capture(Phase.MOVING, autoMode = auto))
         assertEquals(AssistPhase.Capture.OFF,
@@ -301,10 +301,77 @@ class AssistPhaseTest {
     @Test
     fun `computing never captures`() {
         // 用户明确要求：计算时不需要截屏（画面不会变，截了只是白闪）
-        for (mode in listOf(true, false)) for (act in listOf(true, false)) {
+        for (mode in listOf(true, false)) {
             assertEquals(AssistPhase.Capture.OFF,
-                AssistPhase.capture(Phase.THINKING, autoMode = mode))
+                AssistPhase.capture(Phase.THINKING, autoMode = mode, engineSearching = true))
+            assertFalse(
+                AssistPhase.needsBoard(Phase.THINKING, engineSearching = true))
         }
+    }
+
+    @Test
+    fun `fallback thinking must keep reading the board or the machine deadlocks`() {
+        // 真机日志（修前）：进入兜底 THINKING 后 238 秒零 VISION_RAW、零看门狗动作。
+        // 根因是 THINKING 既是"引擎在搜"又是规则表兜底出口，兜底态被当成"计算中"关掉了取帧，
+        // 于是 不取帧 → 识别不产出 → 棋面无法确认 → 分析永远不会被发起 → 永远停留。
+        assertTrue(
+            "兜底计算中必须读盘",
+            AssistPhase.needsBoard(Phase.THINKING, engineSearching = false))
+        assertEquals(
+            AssistPhase.Capture.CONTINUOUS,
+            AssistPhase.capture(Phase.THINKING, autoMode = true, engineSearching = false))
+        // 半自动同样要保持管线活着，只是不主动扫盘
+        assertEquals(
+            AssistPhase.Capture.ON_DEMAND,
+            AssistPhase.capture(Phase.THINKING, autoMode = false, engineSearching = false))
+        // 而真搜索中不读盘这条不能被上面的改动带偏
+        assertFalse(AssistPhase.needsBoard(Phase.THINKING, engineSearching = true))
+    }
+
+    @Test
+    fun `fallback thinking stall is released by restarting analysis`() {
+        // 兜底态自己没有动作可产生：必须由监督表在超时后强制重新发起分析，
+        // 否则它就是"没人管"的永久停留（用户只能强关应用）。
+        assertEquals(
+            AssistPhase.WatchdogAction.RESTART_ANALYSIS,
+            AssistPhase.watchdog(
+                Phase.THINKING,
+                phaseMs = AssistPhase.THINKING_STALL_TIMEOUT_MS + 1,
+                sinceMapMs = 100,
+                engineReady = true,
+                engineWarmupMs = 1000,
+                engineSearching = false,
+            )
+        )
+        // 刚进兜底态不能立刻重发，免得和正常起步抢
+        assertEquals(
+            AssistPhase.WatchdogAction.NONE,
+            AssistPhase.watchdog(
+                Phase.THINKING,
+                phaseMs = 200,
+                sinceMapMs = 100,
+                engineReady = true,
+                engineWarmupMs = 1000,
+                engineSearching = false,
+            )
+        )
+    }
+
+    @Test
+    fun `real search is never mistaken for a stall`() {
+        // 引擎真在算的时候，phaseMs 再长也不该被判成兜底干等；
+        // 长搜索期间画面本来就不会更新，也不能因此重置网格。
+        assertEquals(
+            AssistPhase.WatchdogAction.NONE,
+            AssistPhase.watchdog(
+                Phase.THINKING,
+                phaseMs = AssistPhase.THINKING_STALL_TIMEOUT_MS * 10,
+                sinceMapMs = AssistPhase.NO_MAP_TIMEOUT_MS * 5,
+                engineReady = true,
+                engineWarmupMs = 1000,
+                engineSearching = true,
+            )
+        )
     }
 
     @Test

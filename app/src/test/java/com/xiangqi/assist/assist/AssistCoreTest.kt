@@ -132,6 +132,17 @@ class AssistCoreTest {
     }
 
     @Test
+    fun `tracker needs eight candidate boards after the eight frame window`() {
+        val tracker = BoardTracker(confirmCount = 8)
+        tracker.reset(true)
+        val board = AssistBoard.canonicalStart()
+        repeat(7) {
+            assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(board)))
+        }
+        assertEquals(BoardTracker.Event.NEW_BOARD, tracker.onFrame(res(board)))
+    }
+
+    @Test
     fun `tracker confirms the first board and then any structurally valid new board`() {
         val start = AssistBoard.canonicalStart()
         val mid = AssistBoard.clone(start)
@@ -141,19 +152,33 @@ class AssistCoreTest {
         val tracker = BoardTracker(confirmCount = 3)
         tracker.reset(redGoFirst = true)
 
-        // 首次确认需连续 3 帧一致（防瞬时坏帧/幻觉帧）
+        // 首次确认需连续3帧一致。
         assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(start)))
         assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(start)))
         assertEquals(BoardTracker.Event.NEW_BOARD, tracker.onFrame(res(start)))
-
-        // 轮次不再由跟踪器推断：它只负责确认盘面，轮次由服务层的显式事件维护。
         assertTrue(tracker.redGo)
 
-        // 红走了一步：又是一个结构合法的稳定盘面 → 攒够确认帧后直接采纳
+        // 合法的新棋面连续3帧后确认。
         assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(mid)))
-        repeat(3) { tracker.onFrame(res(mid)) }
+        assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(mid)))
+        assertEquals(BoardTracker.Event.NEW_BOARD, tracker.onFrame(res(mid)))
         assertTrue(AssistBoard.equal(mid, tracker.confirmed!!.canonical))
     }
+
+    @Test fun `tracker normal confirmation uses three frames while class-only changes remain long`() {
+        val start = AssistBoard.canonicalStart()
+        val tracker = BoardTracker(confirmCount = 3)
+        tracker.reset(true)
+        repeat(3) { tracker.onFrame(res(start)) }
+        val moved = AssistBoard.clone(start).also {
+            it[7][4] = it[7][7]
+            it[7][7] = Piece.EMPTY
+        }
+        assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(moved)))
+        assertEquals(BoardTracker.Event.UNSTABLE, tracker.onFrame(res(moved)))
+        assertEquals(BoardTracker.Event.NEW_BOARD, tracker.onFrame(res(moved)))
+    }
+
 
     @Test
     fun `any structurally valid stable board is accepted without a transition gate`() {

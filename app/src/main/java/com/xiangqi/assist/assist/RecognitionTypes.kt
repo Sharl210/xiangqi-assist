@@ -118,7 +118,13 @@ class BoardTracker(private val confirmCount: Int = 3) {
         restore(result, redGoSide)
     }
 
-    fun onFrame(res: RecognitionResult, tolerance: Int = 0): Event {
+    /**
+     * @param legalMove 调用方已用规则引擎证明"本帧相对已确认盘面正好是一步合法着法"。
+     *   这种变化有规则背书，可以用更少的帧数确认（见 [PieceIdentityPolicy.requiredFrames]）；
+     *   无法证明的变化仍然走普通门。把"能证明的快"和"不能证明的慢"分开，是为了让
+     *   提速与提精度同向，而不是靠放松安全门换速度。
+     */
+    fun onFrame(res: RecognitionResult, tolerance: Int = 0, legalMove: Boolean = false): Event {
         val prev = confirmed
         if (!res.isValid()) {
             candidate = null
@@ -166,7 +172,14 @@ class BoardTracker(private val confirmCount: Int = 3) {
         // 与候选局面一致（容差内）则累计。命中候选时保留原候选（不替换成当前帧），
         // 避免把噪声“漂”进确认结果。
         val matchCand = candidate
-        if (matchCand != null && AssistBoard.diffCount(res.canonical, matchCand.canonical) <= tolerance) {
+        // 候选匹配必须与首盘判定同口径：容差只吸收"漏检/高亮"这类占用格差异，
+        // 绝不把"同一格换了汉字"当成同一个候选。原实现只比 diffCount，于是
+        // 「兵↔相」这种同格换字会被容差吸收，来回抖动也能攒够确认帧——既拖慢
+        // 确认（类别变化走长窗口）又可能把一个错误读法当成达成一致而采纳。
+        if (matchCand != null && PieceIdentityPolicy.compatibleWithinTolerance(
+                res.canonical, matchCand.canonical, tolerance
+            )
+        ) {
             candidateHits++
         } else {
             candidate = res
@@ -178,7 +191,7 @@ class BoardTracker(private val confirmCount: Int = 3) {
             prev.canonical, candidate!!.canonical
         )
         val need = PieceIdentityPolicy.requiredFrames(
-            legalMove = false, classOnlyChange = classOnlyChange, normal = confirmCount
+            legalMove = legalMove, classOnlyChange = classOnlyChange, normal = confirmCount
         )
         if (candidateHits >= need) {
             confirmed = candidate!!

@@ -140,11 +140,30 @@ object AssistPhase {
      * - 等待对面落子中：要盯着看对手走了哪一步；
      * - 待落子：**要读**。落子前必须先确认"眼前这个盘面就是建议所依据的盘面"
      *   （否则会照着过期的建议落子），落子后再取一张比对，看这一手有没有落上。
+     * - 计算中：**分两种，必须区分开**（见下）。
      *
-     * 计算中、落子中、暂停、手动、异常：**都不需要读盘**。
+     * 落子中、暂停、手动、异常：**都不需要读盘**。
+     *
+     * ### 为什么「计算中」要按是否真的在搜索分开判
+     *
+     * [RULES] 的最后一行 `search-starting` 是**兜底出口**：只要"轮到我走、但引擎没在
+     * 搜索、着法也没定下来"，就落到 `THINKING`。所以 `THINKING` 同时代表两种完全不同的局面：
+     *
+     * 1. **真的在搜索**（`engineSearching = true`）：画面不会变，读盘没意义，**不取帧**；
+     * 2. **兜底态**（`engineSearching = false`）：这是"该我走、但既没在算、也没定着"，
+     *    它**只能靠读盘推进**——重新确认棋面、重新定着、再发起分析。
+     *
+     * 第 2 种若也按"计算中不取帧"处理，就形成闭环死锁：
+     * 不取帧 → 识别不产出 → 棋面永远无法确认 → 分析永远不会被发起 → 阶段永远停在 THINKING。
+     * 真机日志已复现该闭环：进入兜底 `THINKING` 之后 **238 秒零 `VISION_RAW`、零看门狗动作**，
+     * 只有前台观察在刷，用户只能强关。
+     *
+     * @param engineSearching 引擎此刻是否真的在搜索；只有 `THINKING` 会用到它。
      */
-    fun needsBoard(phase: Phase): Boolean = when (phase) {
+    fun needsBoard(phase: Phase, engineSearching: Boolean = false): Boolean = when (phase) {
         Phase.FINDING, Phase.WAITING, Phase.READY, Phase.VERIFYING -> true
+        // 真搜索中不读盘；兜底态必须读盘，否则状态机原地死锁。
+        Phase.THINKING -> !engineSearching
         else -> false
     }
 
@@ -152,16 +171,16 @@ object AssistPhase {
      * 取帧策略表。
      *
      * **只有读盘阶段才截屏**：
-     * - 计算中不截（画面不会变，截了只是白闪）；
+     * - 算了就不截（真搜索中画面不会变，截了只是白闪）；但没在算的兜底态要继续读盘；
      * - 落子中不截（避免识别与手势打架）；
      * - 待落子要截（落子前确认盘面、落子后核对是否落上）；
      * - 落完子恢复截屏（要盯对手走子）。
      */
-    fun capture(phase: Phase, autoMode: Boolean): Capture = when {
+    fun capture(phase: Phase, autoMode: Boolean, engineSearching: Boolean = false): Capture = when {
         // 用户显式要求一帧：无论什么阶段都取
         phase == Phase.UPDATING -> Capture.ON_DEMAND
         // 不读盘的阶段一律不取
-        !needsBoard(phase) -> Capture.OFF
+        !needsBoard(phase, engineSearching) -> Capture.OFF
         // 自动模式：持续扫盘；半自动：只让管线活着，用户点按钮才真正处理
         autoMode -> Capture.CONTINUOUS
         else -> Capture.ON_DEMAND
@@ -266,6 +285,15 @@ object AssistPhase {
         RESET_GRID,
         /** 引擎长时间未就绪：重启引擎 */
         RESTART_ENGINE,
+        /**
+         * 兜底「计算中」长期没有真的开始搜索：重新驱动分析。
+         *
+         * 这是给兜底 `THINKING` 准备的**逃生通道**。该状态本身不产生任何动作
+         * （引擎没在算、着法没定、棋面也没变），如果发起分析的路径因为任何原因
+         * 没走通（闸门仍占着同一局面、上一轮分析周期没收回、落子重建后的旧状态回灌等），
+         * 它就会永久停留。超时后强制作废该局面的分析周期并重新发起，才是状态机自己的兜底。
+         */
+        RESTART_ANALYSIS,
     }
 
     /**
@@ -273,6 +301,7 @@ object AssistPhase {
      *
      * @param phaseMs 当前阶段已持续的时间
      * @param sinceMapMs 距最近一次成功识别的时间；< 0 表示本轮还没成功过
+     * @param engineSearching 引擎此刻是否真的在搜索（区分「真计算中」与兜底「计算中」）
      */
     fun watchdog(
         phase: Phase,
@@ -280,13 +309,19 @@ object AssistPhase {
         sinceMapMs: Long,
         engineReady: Boolean,
         engineWarmupMs: Long,
+        engineSearching: Boolean = false,
     ): WatchdogAction = when {
         phase == Phase.PAUSED || phase == Phase.MANUAL -> WatchdogAction.NONE
         !engineReady && engineWarmupMs > ENGINE_READY_TIMEOUT_MS -> WatchdogAction.RESTART_ENGINE
         (phase == Phase.MOVING || phase == Phase.VERIFYING) && phaseMs > LANDING_TIMEOUT_MS ->
             WatchdogAction.RELEASE_LANDING
         phase == Phase.UPDATING && phaseMs > REFRESH_TIMEOUT_MS -> WatchdogAction.FAIL_REFRESH
-        needsBoard(phase) && sinceMapMs >= 0 && sinceMapMs > NO_MAP_TIMEOUT_MS ->
+        // 兜底「计算中」干等太久：先把它踢回可推进的流程，再去谈"画面陈旧"。
+        // 必须排在 RESET_GRID 之前——该状态下棋面往往是新鲜的（刚刚才识别成功），
+        // 真正缺的是"有人去发起分析"，用 RESET_GRID 反而会把刚建立的定位清掉。
+        phase == Phase.THINKING && !engineSearching && phaseMs > THINKING_STALL_TIMEOUT_MS ->
+            WatchdogAction.RESTART_ANALYSIS
+        needsBoard(phase, engineSearching) && sinceMapMs >= 0 && sinceMapMs > NO_MAP_TIMEOUT_MS ->
             WatchdogAction.RESET_GRID
         else -> WatchdogAction.NONE
     }
@@ -318,6 +353,13 @@ object AssistPhase {
 
     /** 曾经成功识盘后，持续没有任何有效盘面才触发的保护期限。 */
     const val NO_MAP_TIMEOUT_MS = 10_000L
+
+    /**
+     * 兜底「计算中」的干等上限：这么久还没真的开始搜索，就认定发起分析的路径没走通，
+     * 强制作废该局面的分析周期并重新发起（见 [WatchdogAction.RESTART_ANALYSIS]）。
+     * 取得比一次正常分析周期（100ms 计算 + 几十毫秒调度）宽得多，不会误伤正在起步的搜索。
+     */
+    const val THINKING_STALL_TIMEOUT_MS = ThinkingRestartPolicy.STALL_TIMEOUT_MS
 
     /** 引擎就绪上限 */
     const val ENGINE_READY_TIMEOUT_MS = 30_000L

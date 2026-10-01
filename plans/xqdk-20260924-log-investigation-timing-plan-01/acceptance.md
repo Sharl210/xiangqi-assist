@@ -1,10 +1,10 @@
 # 象棋辅助 1.3.4 逐条验收（活动文档）
 
-最近核验时间：2026-09-30 03:18（Asia/Shanghai）
-验收回路轮次：第 5 轮
-本轮基准代码提交：工作树（尚未提交）；新增静止帧看门狗保护与黑将定向类别复核
-本轮验收产物：待 Release 构建完成后写入 `/workspace/dist-xqdk-local-20260930-r6/`
-本轮定向验证：`PipelineHealthPolicyTest`、`YoloPipelineTest` 通过；全量单测 472 项中 464 项通过，8 项仍为本机 Robolectric 原生库缺失
+最近核验时间：2026-10-01 夜（Asia/Shanghai）
+验收回路轮次：第 13 轮
+本轮基准代码提交：工作树（尚未提交）；本轮修复：识别静默（静止画面下释放闸门永久关闭）与非法棋面空转（送引擎自检失败只记拒绝、不作废局面）
+本轮验收产物：`docs/evidence/recognition-audit-20261001.md`、`docs/evidence/latest-log-20261001-fixed-conflict.md`、`docs/evidence/recognition-latency-20261001.md`、`docs/evidence/recognition-conflict-tolerance-20261001.md`、`docs/evidence/recognition-thinking-deadlock-20261001.md`、`docs/evidence/recognition-latency-and-accuracy-20261001.md`、`docs/evidence/recognition-silence-and-unsafe-board-20261001.md`
+本轮定向验证：`StableFrameWindowTest`、`ThinkingRestartPolicyTest`、`AssistPhaseTest`、`AssistCoreTest`、`PipelineHealthPolicyTest`、`FrameStabilityPolicyTest`、`HeartbeatPolicyTest`、`PieceIdentityPolicyTest`、`DetectionConflictTolerancePolicyTest`、`AssistUpgradeTest` 通过；全量 505 项中 8 项为本机缺 Robolectric 原生库的环境失败；双变体 Release 构建成功且证书与正式版一致
 
 ## 怎么读这份文档
 
@@ -52,6 +52,9 @@
 | R-32 | 第二份日志（Lite）同样是整轮零识别：`VISION_RAW` 0 次、`stableAge` 恒 -1 | 进行中 | 新增根因：录屏用的是 VirtualDisplay，**屏幕内容不变化时它不再投递新帧**，于是“连续 8 个样本”的判据在静止画面上永远无法满足，识别一次都不会发生（第二份日志里 30 秒只有约 6 帧，稳态下每次重建只回一帧）。已新增**静默放行**：最后一张样本之后静默超过 600ms 就用窗口里最后那张样本进入一次识别，超过 3 秒没有新帧则判定为取帧故障交给看门狗（不拿过期画面反复当新棋面）；两次静默放行之间至少间隔 500ms，避免同一静止画面被反复推理。另修：取帧重建不再参与指数退避（固定 625ms），连续 3 次重建仍一帧未到时改为提示用户点『继续』重新授权，不再无限重建。新增单测 5 项、策略单测 3 项。真机未复测。 | `StableFrameWindow.kt`、`PipelineHealthPolicy.kt`、`ScreenAssistService.kt` |
 
 || R-33 | 第三份日志 Medium 已有 `VISION_RAW` 但仍不可用，且随后进入连续 `REBUILD_CAPTURE` | 进行中 | 已确认 Medium 推理正常（约 197–449ms），识别结果持续缺黑将，安全门正确拒绝 `黑将数量异常:0`；更严重的是 `framesSinceRebuild=132` 时仍把静止无新帧误判为取帧停摆，随后重建后只有 1–2 帧仍反复重建。已修：本次重建后只要收到并消费过帧，就不再按静止无新帧重建；缺王救援阈值和类别边际同步跟随每三次降档。定向单测通过，双变体 Release 已打包；真机复测未完成。 | `PipelineHealthPolicy.kt`、`YoloBoardDetector.kt`、`ScreenAssistService.kt`、`tools/verify_test_log_screenshots.py` |
+| R-34 | 设备端最新 `assist.log`：识别长期失败、卡死拉不起来 | 进行中 | 已定位根因：全会话仅 3 次 `BOARD_CONFIRMED`，此后 `r=9,c=8` 固定出现「红车 0.708 / 红炮 0.684」同格竞争，`misses` 累计 111、`RESET_GRID` 每 10 秒一次、`phaseAge` 达 103425ms，116 秒无确认。映射层其实已按「高分占位」得出正确棋面，但 `recognizeFrame` 对任何冲突一律整帧否决。已新增 `DetectionConflictTolerancePolicy`（分差 ≥ 0.02 且胜者占位方可容忍），并在双王、结构、位置门全过后才放行，同时打 `VISION_CONFLICT_TOLERATED`；模糊僵局仍拒绝。**该修复在本轮真机日志中已验证生效**：`VISION_CONFLICT_TOLERATED` 出现 6 次、`BOARD_CONFIRMED` 9 次、连续自动落子 11 步、`RESET_GRID` 0 次（对照修前 3 次确认、111 次拒绝、卡死 103 秒）。仍判进行中：同一局在 11 步之后出现另一条卡死（见 R-35），整体可用性尚未闭合。 | `DetectionConflictTolerancePolicy.kt`、`ScreenAssistService.kt`、`docs/evidence/recognition-conflict-tolerance-20261001.md` |
+| R-35 | 复测日志：`LANDING_REBASE_FALLBACK` 后整局 238 秒零识别、零看门狗，只能强关；并要求「给日志即改，不得再问」 | 进行中 | 已定位两条叠加根因：① `AssistPhase.needsBoard(THINKING)` 原为 `false`，而 `THINKING` 既是"引擎在搜"又是规则表兜底出口，兜底态因此被关掉取帧 → 识别不产出 → 棋面无法确认 → 分析永不发起 → 阶段永不变化；② `requestWatchdog()` 续期条件在「THINKING 且未搜索」时全为假 → 看门狗停止续期，监督链一起断。已修：`needsBoard`/`capture`/`watchdog` 全部按真实 `searching` 区分，新增 `WatchdogAction.RESTART_ANALYSIS`（`THINKING_STALL_TIMEOUT_MS = 3_000L`）作逃生通道，`tickWatchdog` 内补 `syncCaptureDemand`；新增回归测试 3 项。**该修复在 2026-10-01 傍晚真机日志中已验证生效**：整局 100+ 次 `BOARD_CONFIRMED`、连续自动落子 100+ 步、`RESET_GRID` 0 次、无静默死锁段落。仍判进行中：本轮新开提速与提精度需求（见 R-36），且需回归确认长局稳定性。 | `AssistPhase.kt`、`ScreenAssistService.kt`、`docs/evidence/recognition-thinking-deadlock-20261001.md` |
+| R-36 | 识别精准度须高于当前，且整体处理时间降到当前的 1/2 | 进行中 | 已从设备端日志（1711844 字节，最后写入 2026-10-01T18:07:22，100+ 次确认的稳定会话）完成时间分解，确认瓶颈是**推理次数而非采样时钟**：采样 8fps、稳定窗口 4 帧、确认 3 帧，每次释放稳定窗口跑一次模型推理，真机 Medium 单帧推理实测 291–851ms（均值约 500ms），3 帧 ≈ 1.5 秒，与实测「对手落子 → 我方确认」1.1–1.5 秒吻合；另 `FULL_VISION_RECHECK` 每 1800ms 还插入一次整屏推理，日志中整屏与裁剪结果约各占一半。**提速**：确认 3→2 帧、识别稳定窗口 4→3 帧、整屏复核间隔 1800→3000ms（自适上限 5400→9000ms）、类别纯变化窗口 8→4 帧（原值等于取样窗口长度，等于把延迟放大到 4 秒）。**提精度**：接上此前从未被调用的 `PieceIdentityPolicy.repairMovedPiece`（终点被误读成同色另一棋子时用起点原类别还原并由规则引擎验证）；`BoardTracker` 候选匹配收紧为与首盘同口径的 `compatibleWithinTolerance`，容差只吸收占用格差异、**不再把「同格换汉字」当成同一候选**（旧实现只比差异格数，车↔兵↔相抖动也能攒够确认帧）；快慢由证据决定——仅能被规则证明的一步合法着法走 2 帧快通道。新增回归断言 4 组，定向测试 11 类通过，双变体 Release 构建成功且证书一致。真机未复测。 | `ScreenAssistService.kt`、`RecognitionTypes.kt`、`PieceIdentityPolicy.kt`、`docs/evidence/recognition-latency-and-accuracy-20261001.md` |
 
 
 
@@ -60,6 +63,8 @@
 - 未关闭项（必须继续做）：
   1. R-23 降耗改动已落地，但缺实时电流/温度实测，仍判进行中。
   2. R-03 / R-13 / R-16 / R-19 / R-26 / R-31 / R-32 需要装新包做设备复测，并回传新日志。
+  2b. R-34 / R-35 的修复已在 2026-10-01 傍晚真机日志中验证生效（100+ 次确认、连续落子 100+ 步、0 次网格重置），但仍需在新包上回归，确认提速改动没有把这两条重新打开。
+  2c. R-36（提速至 1/2 + 提精度）完成主机验证，真机需核对 `BOARD_CONFIRMED → ANALYSIS_REQUEST` 间隔是否降到约一半、动画期间不提前计算、棋盘整体位移时 1 秒兜底整屏复核仍有效。
   3. R-20 / R-22 / R-27 主机已全过（本轮机内复跑仍为 Medium 55/55、Lite 55/55），但必须用真机逐张复测；在此之前不得宣称交付完成。
   4. R-06 / R-09 属于“优化到样本满分”的持续项，跟真机复测一起收敛。
 
