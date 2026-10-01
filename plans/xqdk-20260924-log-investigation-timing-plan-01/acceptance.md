@@ -1,8 +1,8 @@
 # 象棋辅助 1.3.4 逐条验收（活动文档）
 
-最近核验时间：2026-10-01 夜（Asia/Shanghai）
+最近核验时间：2026-10-01 深夜（Asia/Shanghai）
 验收回路轮次：第 13 轮
-本轮基准代码提交：工作树（尚未提交）；本轮修复：识别静默（静止画面下释放闸门永久关闭）与非法棋面空转（送引擎自检失败只记拒绝、不作废局面）
+本轮基准代码提交：e64ee44（已推送 main）；发布页 v1.3.4 资产已更新为本版构建
 本轮验收产物：`docs/evidence/recognition-audit-20261001.md`、`docs/evidence/latest-log-20261001-fixed-conflict.md`、`docs/evidence/recognition-latency-20261001.md`、`docs/evidence/recognition-conflict-tolerance-20261001.md`、`docs/evidence/recognition-thinking-deadlock-20261001.md`、`docs/evidence/recognition-latency-and-accuracy-20261001.md`、`docs/evidence/recognition-silence-and-unsafe-board-20261001.md`
 本轮定向验证：`StableFrameWindowTest`、`ThinkingRestartPolicyTest`、`AssistPhaseTest`、`AssistCoreTest`、`PipelineHealthPolicyTest`、`FrameStabilityPolicyTest`、`HeartbeatPolicyTest`、`PieceIdentityPolicyTest`、`DetectionConflictTolerancePolicyTest`、`AssistUpgradeTest` 通过；全量 505 项中 8 项为本机缺 Robolectric 原生库的环境失败；双变体 Release 构建成功且证书与正式版一致
 
